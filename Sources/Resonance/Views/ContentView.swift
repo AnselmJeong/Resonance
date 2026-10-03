@@ -32,6 +32,10 @@ struct ContentView: View {
                     Button { searchFocused = true } label: { Image(systemName: "magnifyingglass") }.keyboardShortcut("f").help("라이브러리 검색")
                     Button { model.chooseRoot() } label: { Image(systemName: "folder.badge.plus") }.help("음악 폴더 추가")
                     Button { model.inspector.toggle() } label: { Image(systemName: "sidebar.right") }.help("감상 정보 표시")
+                    SettingsLink { Label("설정", systemImage: "gearshape") }
+                        .labelStyle(.titleAndIcon)
+                        .help("설정 열기")
+                        .accessibilityLabel("설정 열기")
                 }
             }
         }
@@ -73,7 +77,7 @@ struct SidebarView: View {
                     Text(model.scan?.current ?? "음악을 찾고 있습니다").font(.caption2).lineLimit(1).foregroundStyle(.secondary)
                 } else { Text("\(model.counts.albums.formatted()) 앨범 · \(model.counts.tracks.formatted()) 트랙").font(.caption).foregroundStyle(.secondary) }
                 if !model.connected { Label("음악 볼륨을 다시 연결하세요", systemImage: "externaldrive.badge.exclamationmark").font(.caption).foregroundStyle(.orange) }
-                HStack { Button { model.startScan() } label: { Label("재스캔", systemImage: "arrow.clockwise") }.disabled(model.scanning || model.roots.isEmpty); Spacer(); SettingsLink { Image(systemName: "gearshape") } }.buttonStyle(.borderless).font(.caption)
+                HStack { Button { model.startScan() } label: { Label("재스캔", systemImage: "arrow.clockwise") }.disabled(model.scanning || model.roots.isEmpty); Spacer() }.buttonStyle(.borderless).font(.caption)
             }.padding(16)
         }
     }

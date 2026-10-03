@@ -9,7 +9,7 @@ public actor MusicBrainzClient {
         if let query { url.queryItems?.append(.init(name: "query", value: query)); url.queryItems?.append(.init(name: "limit", value: "12")) }
         if let inc { url.queryItems?.append(.init(name: "inc", value: inc)) }
         var req = URLRequest(url: url.url!); req.timeoutInterval = 30
-        req.setValue("Resonance/0.1.0 (personal macOS music library; https://musicbrainz.org/doc/MusicBrainz_API)", forHTTPHeaderField: "User-Agent")
+        req.setValue("Resonance/0.2.0 (personal macOS music library; https://musicbrainz.org/doc/MusicBrainz_API)", forHTTPHeaderField: "User-Agent")
         guard let body = try JSONSerialization.jsonObject(with: await http.send(req)) as? [String: Any] else { throw AppError.message("MusicBrainz 응답 형식 오류") }
         return body
     }

@@ -112,3 +112,16 @@
 - **해결.** Resonance가 X100에 AirPlay 1(RAOP, ALAC 44.1 kHz/16-bit) 스트림을 직접 보낸다. 시스템 기본 출력은 Mac에 남는다. 사용자가 앰프 음량 35에서 X100 재생, 일시정지·재개, seek, 이전/다음 곡, 자동 곡 넘김을 확인했다.
 - 원인: macOS는 앱 단위 AirPlay를 AirPlay 2 수신기에만 허용한다(X100은 AirPlay 1). 이전 직접 송신 시험의 “소리 없음”은 -20~-26 dB의 낮은 AirPlay 음량 때문이었다. 자세한 기록과 구현 위치는 [X100 조사 기록 11절](x100-airplay-investigation-2026-10-03.md)에 있다.
 - `./script/test.sh`: 28개 중 26개 실행·통과(선택 2개 건너뜀), 신규 AirPlay 검사 6개 포함. 30분 연속 재생·연결 해제/재연결·설치본 갱신은 남아 있다.
+
+## 0.2.0 릴리스 · 2026-10-03
+
+- 기존 구현 전체를 `24289c4`로 먼저 커밋했다. 기존 전체 검사에서 32개 테스트 정의에 실패가 없었다. 선택적 benchmark와 실제 모델 smoke 2개는 기본 설정으로 건너뛰었고, 로컬 예시 FLAC 폴더가 없어 해당 검사의 실제 음원 경로는 실행되지 않았다.
+- 상단 도구 모음에 톱니바퀴와 ‘설정’이 함께 표시되는 SettingsLink를 추가했다. 설치된 앱에서 이 버튼으로 `Resonance Settings` 창이 열리는 것을 확인했다.
+- 기본 macOS About 패널이 번들의 `Credits.rtf`를 읽어 `Developed by Anselm Jeong`을 표시한다. 설치된 앱의 실제 About 창에서 `Version 0.2.0 (2)`와 개발자 문구를 확인했다. 설정의 운영과 백업 탭에서도 `Resonance 0.2.0` 표시를 확인했다.
+- 버전 변경 후 서비스 검사 6개가 통과했다. 선택적인 실제 모델 smoke 1개는 건너뛰었다. Release 빌드, 셸 구문 검사, `git diff --check`가 통과했다.
+- `./script/build_and_run.sh --dmg`로 arm64 Release 앱과 `dist/Resonance-0.2.0.dmg`를 생성했다. DMG에는 `Resonance.app`과 `/Applications` 바로가기가 들어 있다. DMG 체크섬 검증, 실제 마운트, 내부 앱의 서명 무결성 검사, 빌드본과 실행 파일·Info.plist·Credits.rtf 비교를 통과했다. 검증 후 DMG를 분리했다.
+- 기존 설치 앱을 정상 종료한 뒤 `/Users/anselm/Applications/Resonance.app`을 교체했다. 설치본과 빌드본의 실행 파일이 일치하고 `codesign --verify --deep --strict`가 통과했다. 기존 라이브러리 312개 앨범·5,728개 트랙과 재생 위치 2:07이 복원됐으며, 재생은 일시 정지 상태로 확인했다. 실제 DB의 무결성 검사도 `ok`였다.
+- 교체 전 앱과 SQLite backup API로 만든 DB 사본은 `dist/backups/pre-0.2.0.DrQl0q/`에 보존했다. Keychain과 원본 음원은 수정하지 않았다.
+- DMG SHA-256: `c75b0796ff6b60fb659fcc3a6720dfef127ad0224d6925b3b105f172f33db9f4`.
+- 설치 실행 파일 SHA-256: `4a748f500ea578ac9958bc40ae009ccb11e00fa010851dd99024af440c8745b8`.
+- 기존 방식의 로컬 ad-hoc 서명이다. Developer ID 서명과 notarization은 수행하지 않았다. 이번 릴리스 확인에서 수신기 청취·장시간 재생을 다시 시험하지 않았다.

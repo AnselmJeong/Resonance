@@ -12,11 +12,13 @@ macOS 14 이상, Swift 6 툴체인과 Command Line Tools가 필요합니다. 개
 ./script/build_and_run.sh --verify --sample
 # 실행 없이 .app 생성
 ./script/build_and_run.sh --build
+# Release 구성의 앱과 설치용 DMG 생성
+./script/build_and_run.sh --dmg
 ```
 
 생성 앱은 `dist/Resonance.app`입니다. Codex의 Run 버튼도 같은 스크립트를 실행합니다. `--logs`, `--telemetry`, `--debug`로 진단할 수 있습니다. 현재 번들은 로컬 ad-hoc 서명이며 Developer ID 서명과 notarization은 하지 않았습니다.
 
-현재 검증본은 `~/Applications/Resonance.app`에도 설치되어 있습니다. 개발 스크립트는 `dist` 번들을 만든 뒤 설치본이 있으면 함께 교체하고 설치본을 실행합니다. `--diagnostics`로 설치 번들을 실행하면 자체 임시 Keychain 항목과 DB·큐·출력 상태를 검사해 저장 폴더의 `Diagnostics.json`에 기록합니다.
+현재 검증본은 `~/Applications/Resonance.app`에도 설치되어 있습니다. 개발 스크립트는 실행 모드에서 `dist` 번들을 만든 뒤 설치본이 있으면 함께 교체하고 설치본을 실행합니다. `--build`와 `--dmg`는 결과물만 생성하며, DMG는 `dist/Resonance-0.2.0.dmg`에 저장됩니다. `--diagnostics`로 설치 번들을 실행하면 자체 임시 Keychain 항목과 DB·큐·출력 상태를 검사해 저장 폴더의 `Diagnostics.json`에 기록합니다.
 
 처음에는 ‘음악 폴더 추가’로 라이브러리 루트를 선택합니다. `/Volumes/Music1`이 연결되어 있으면 그 폴더를 선택하세요. 직접 하위 폴더가 컬렉션이 되고, ‘모든 앨범’에서 전체를 탐색합니다. 앨범 커버는 상세 화면을 열고, 재생 버튼이 음악을 시작합니다.
 

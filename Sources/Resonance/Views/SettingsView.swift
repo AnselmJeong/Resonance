@@ -92,7 +92,7 @@ struct SettingsView: View {
         if let scan = model.scan {
             Section("최근 스캔") { Text("발견 \(scan.discovered) · 처리 \(scan.processed) · 변경 없음 \(scan.reused)"); if scan.cancelled { Text("중단됨 · 재스캔 시 이미 처리한 파일을 재사용합니다") }; ForEach(Array(scan.errors.prefix(200).enumerated()), id: \.offset) { _, error in Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) } }
         }
-        Section("버전") { Text("Resonance 0.1.0 · macOS 14+ · AVQueuePlayer"); Text("로컬 개발용 ad-hoc 서명. Developer ID 서명과 notarization은 포함하지 않습니다.").font(.caption).foregroundStyle(.secondary) }
+        Section("버전") { Text("Resonance \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "개발 빌드") · macOS 14+"); Text("로컬 개발용 ad-hoc 서명. Developer ID 서명과 notarization은 포함하지 않습니다.").font(.caption).foregroundStyle(.secondary) }
     }
     private func refreshKeyStatus() async {
         do {
