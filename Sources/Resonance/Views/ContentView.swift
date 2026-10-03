@@ -63,9 +63,18 @@ struct SidebarView: View {
                     Label("즐겨찾기", systemImage: "heart").tag("favorites")
                     Label("음악가", systemImage: "person.2").tag("artists")
                 }
-                if !model.sections.isEmpty {
-                    Section("폴더 컬렉션") {
-                        ForEach(model.sections.filter { !$0.hidden }) { section in Label(section.name, systemImage: "music.note.list").tag(section.id) }
+                if !model.roots.isEmpty {
+                    Section("음악 폴더") {
+                        ForEach(model.roots) { root in
+                            Label(root.name, systemImage: root.status == "연결됨" ? "folder" : "externaldrive.badge.exclamationmark")
+                                .tag(root.navigationID)
+                                .help(root.path + " · " + root.status)
+                        }
+                    }
+                }
+                if let root = model.collectionRoot, !model.visibleSections.isEmpty {
+                    Section("\(root.name) 컬렉션") {
+                        ForEach(model.visibleSections) { section in Label(section.name, systemImage: "music.note.list").tag(section.id) }
                     }
                 }
             }.listStyle(.sidebar)

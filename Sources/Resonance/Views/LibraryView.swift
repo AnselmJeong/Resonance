@@ -31,7 +31,11 @@ struct LibraryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 6) { Text(model.query.isEmpty ? model.header : "검색 결과").font(.system(size: 28, weight: .semibold)); Text(model.query.isEmpty ? "커버에서 시작하는 나만의 음악 컬렉션" : "개인 라이브러리에서 찾은 음악").foregroundStyle(.secondary).font(.callout) }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(model.query.isEmpty ? model.header : "검색 결과").font(.system(size: 28, weight: .semibold))
+                    Text(model.query.isEmpty ? model.librarySubtitle : model.searchSection && model.hasSearchScope ? "\(model.header)에서 찾은 음악" : "전체 라이브러리에서 찾은 음악")
+                        .foregroundStyle(.secondary).font(.callout).lineLimit(1).truncationMode(.middle)
+                }
                 Spacer()
                 if model.query.isEmpty && model.selection != "artists" {
                     Picker("정렬", selection: $model.sort) { Text("앨범명").tag("title"); Text("아티스트").tag("artist"); Text("최신 발매").tag("date") }.frame(width: 135).labelsHidden()
@@ -39,7 +43,7 @@ struct LibraryView: View {
             }.padding(26)
             if !model.query.isEmpty {
                 HStack {
-                    Toggle("현재 컬렉션", isOn: $model.searchSection).toggleStyle(.checkbox).disabled(model.sectionID == nil)
+                    Toggle(model.searchScopeLabel, isOn: $model.searchSection).toggleStyle(.checkbox).disabled(!model.hasSearchScope)
                     Picker("역할", selection: $model.roleFilter) { Text("모든 역할").tag("all"); Text("작곡").tag("composer"); Text("연주").tag("performer"); Text("지휘").tag("conductor") }.frame(width: 140)
                     Picker("형식", selection: $model.formatFilter) { Text("모든 형식").tag("all"); Text("FLAC").tag("FLAC"); Text("MP3").tag("MP3") }.frame(width: 140)
                     Spacer()

@@ -1,5 +1,6 @@
 import Testing
 import AVFoundation
+import GRDB
 @testable import ResonanceCore
 
 @Suite(.serialized) final class CoreTests {
@@ -57,6 +58,73 @@ import AVFoundation
         let aliasAfterRescan = try await db.search("구노"); #expect(aliasAfterRescan.contains { $0.entityID == "gounod" })
         let sectionPeople = try await db.search("Gounod", sectionID: section.id); #expect(sectionPeople.contains { $0.kind == "artist" })
     }
+    @Test func testRootAlbumBrowsingKeepsScopeAcrossPagesAndFilters() async throws {
+        let dir = try temporary(), db = try database(dir)
+        let roots = ["Artist", "Composer", "Contemporary"].map { LibraryRoot(path: dir.appendingPathComponent($0).path) }
+        let sections = roots.map { LibrarySection(rootID: $0.id, relativePath: "Shared", name: "Shared") }
+        for (root, section) in zip(roots, sections) {
+            try await db.saveRoot(root); try await db.saveSection(section)
+        }
+        for index in 0..<5 {
+            let rootIndex = index % 2
+            let album = Album(id: "scoped-\(index)", rootID: roots[rootIndex].id, sectionID: sections[rootIndex].id, folder: roots[rootIndex].path, title: "Album \(index)", artist: "Same artist", date: "202\(index)")
+            try await db.upsert(album: album, tracks: [], scanID: "scan")
+        }
+        #expect(try await db.albums().count == 5)
+        let first = try await db.albums(rootID: roots[0].id, limit: 2)
+        let second = try await db.albums(rootID: roots[0].id, limit: 2, offset: 2)
+        #expect((first + second).map(\.id) == ["scoped-0", "scoped-2", "scoped-4"])
+        #expect(try await db.albums(rootID: roots[1].id).map(\.id) == ["scoped-1", "scoped-3"])
+        #expect(try await db.albums(rootID: roots[2].id).isEmpty)
+        #expect(try await db.albums(rootID: "missing-root").isEmpty)
+        #expect(try await db.albums(rootID: roots[0].id, sort: "date").map(\.id) == ["scoped-4", "scoped-2", "scoped-0"])
+        #expect(try await db.albums(rootID: roots[0].id, sectionID: sections[1].id).isEmpty)
+        try await db.setFavorite("scoped-2", value: true)
+        try await db.setFavorite("scoped-3", value: true)
+        #expect(try await db.albums(rootID: roots[0].id, favorites: true).map(\.id) == ["scoped-2"])
+        // The imported root remains authoritative even after a custom collection move.
+        try await db.editAlbum("scoped-2", title: "Album 2", artist: "Same artist", sectionID: sections[1].id)
+        #expect(try await db.albums(rootID: roots[0].id).map(\.id) == ["scoped-0", "scoped-2", "scoped-4"])
+        var hidden = sections[0]; hidden.hidden = true; try await db.saveSection(hidden)
+        #expect(try await db.albums(rootID: roots[0].id).map(\.id) == ["scoped-2"])
+        #expect(try await db.albums().count == 3)
+    }
+
+    @Test func testRootSearchUsesTrackRelationshipsForSharedEntities() async throws {
+        let dir = try temporary(), db = try database(dir)
+        let roots = ["Artist", "Composer", "Contemporary"].map { LibraryRoot(path: dir.appendingPathComponent($0).path) }
+        var works: [String] = []
+        for (index, root) in roots.enumerated() {
+            let section = LibrarySection(rootID: root.id, relativePath: "Shared", name: "Shared")
+            try await db.saveRoot(root); try await db.saveSection(section)
+            guard index < 2 else { continue }
+            let album = Album(id: "album-\(index)", rootID: root.id, sectionID: section.id, folder: root.path, title: "Shared Album", artist: "Shared Artist")
+            let track = Track(id: "track-\(index)", rootID: root.id, albumID: album.id, relativePath: "01.flac", title: "Shared Track", number: 1, format: index == 0 ? "FLAC" : "MP3", tags: ["WORK": ["Shared Work"]], credits: [Credit(artistID: "shared-artist", name: "Shared Artist", role: "composer"), Credit(artistID: "unique-\(index)", name: "Shared Performer \(index)", role: "performer")])
+            try await db.upsert(album: album, tracks: [track], scanID: "scan")
+            works.append(TextKey.id(album.id, "work", "Shared Work"))
+        }
+        // Link one work to recordings in both roots. Its search document still points at root 0.
+        let raw = try GRDB.DatabaseQueue(path: db.path)
+        let sharedWorkID = works[0]
+        try await raw.write { db in
+            try db.execute(sql: "INSERT INTO recordingWork(recordingID,workID,source) VALUES(?,?,'musicbrainz')", arguments: ["recording:track-1", sharedWorkID])
+        }
+        let first = try await db.search("Shared", rootID: roots[0].id)
+        #expect(Set(first.map(\.entityID)) == Set(["album-0", "track-0", "shared-artist", "unique-0", works[0]]))
+        let second = try await db.search("Shared", rootID: roots[1].id)
+        #expect(Set(second.map(\.entityID)) == Set(["album-1", "track-1", "shared-artist", "unique-1", works[0], works[1]]))
+        #expect(try await db.search("Shared", rootID: roots[2].id).isEmpty)
+        #expect(try await db.search("Shared", rootID: "missing-root").isEmpty)
+        #expect(try await db.search("Shared").count == 9)
+        #expect(try await db.search("Shared", rootID: roots[0].id, format: "MP3").isEmpty)
+        #expect(try await db.search("Shared", rootID: roots[1].id, format: "MP3").map(\.entityID) == ["track-1"])
+        let composerHits = try await db.search("Shared", rootID: roots[0].id, role: "composer")
+        #expect(Set(composerHits.map(\.entityID)) == Set(["shared-artist", "track-0"]))
+        _ = try await db.removeRoot(roots[0].id)
+        #expect(try await db.search("Shared", rootID: roots[0].id).isEmpty)
+        #expect(try await db.search("Shared", rootID: roots[1].id).contains { $0.entityID == works[0] })
+    }
+
     @Test func testMultidiscCopiesExclusionsAndSymlink() async throws {
         let dir = try temporary(), music = dir.appendingPathComponent("music"), external = dir.appendingPathComponent("external")
         try FileManager.default.createDirectory(at: music, withIntermediateDirectories: true)
@@ -85,6 +153,113 @@ import AVFoundation
         _ = try await scanner.scan(root: root) { _ in }
         let edited = try await db.album(joined.id); #expect(edited?.title == "수동 표시명")
         let integrity = try await db.integrityCheck(); #expect(integrity == "ok")
+    }
+    @Test func testCompilationGroupingAcrossScanBatchesAndEditions() async throws {
+        let dir = try temporary(), music = dir.appendingPathComponent("music")
+        for disc in 1...2 {
+            for number in 1...(disc == 1 ? 20 : 22) {
+                try writeAudio(music, path: "Classic/Tribute/CD\(disc)/\(number).flac", tags: ["ALBUM=Tribute (CD\(disc))", "ARTIST=Performer \(number % 6)", "DISCNUMBER=\(disc)", "TRACKNUMBER=\(number)"])
+            }
+        }
+        try writeAudio(music, path: "Classic/Other edition/1.flac", tags: ["ALBUM=Tribute (CD1)", "ARTIST=Solo artist"])
+        try writeAudio(music, path: "Classic/Tribute/CD1/different-upc.flac", tags: ["ALBUM=Tribute (CD1)", "ARTIST=Solo artist", "UPC=another-edition"])
+        for number in 1...2 {
+            try writeAudio(music, path: "Classic/Explicit/\(number).flac", tags: ["ALBUM=Explicit compilation", "ALBUMARTIST=Album Ensemble", "ARTIST=Performer \(number)"])
+        }
+        let db = try database(dir), root = LibraryRoot(path: music.path)
+        try await db.saveRoot(root)
+        let scanner = LibraryScanner(database: db, cache: dir.appendingPathComponent("cache"))
+        let first = try await scanner.scan(root: root) { _ in }
+        #expect(first.finished); #expect(first.errors.isEmpty); #expect(first.processed == 46)
+        let albums = try await db.albums()
+        #expect(albums.count == 5)
+        let discs = albums.filter { $0.artist == "Various Artists" }
+        #expect(discs.map(\.trackCount).sorted() == [20, 22])
+        #expect(albums.first { $0.title == "Explicit compilation" }?.artist == "Album Ensemble")
+        for album in discs {
+            let tracks = try await db.tracks(albumID: album.id)
+            #expect(Set(tracks.flatMap(\.credits).filter { $0.role == "performer" }.map(\.name)).count == 6)
+        }
+        let second = try await scanner.scan(root: root) { _ in }
+        #expect(second.reused == 46)
+        #expect(try await db.albums().map(\.id) == albums.map(\.id))
+        #expect(try await db.search("Various Artists").filter { $0.kind == "album" }.count == 2)
+    }
+
+    @Test func testLegacyCompilationMigrationPreservesTracksQueueAndCredits() async throws {
+        let dir = try temporary(), music = dir.appendingPathComponent("music")
+        let root = LibraryRoot(path: music.path), section = LibrarySection(rootID: root.id, relativePath: "Classic", name: "Classic")
+        var seed: LibraryDatabase? = try database(dir)
+        try await seed!.saveRoot(root); try await seed!.saveSection(section)
+        var fragments: [String: (Album, [Track])] = [:]
+        for disc in 1...2 {
+            for number in 1...(disc == 1 ? 20 : 22) {
+                let performer = disc == 1 ? (number <= 14 ? "Ricci" : "Kreisler") : "Performer \(number % 6)"
+                let relative = "Classic/Tribute/CD\(disc)/\(number).flac", title = "Tribute (CD\(disc))"
+                let tags = ["ALBUM": [title], "ARTIST": [performer], "DISCNUMBER": ["\(disc)"], "TRACKNUMBER": ["\(number)"], "WORK": ["Shared work"]]
+                try writeAudio(music, path: relative, tags: tags.flatMap { key, values in values.map { key + "=" + $0 } })
+                let values = try music.appendingPathComponent(relative).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                let oldID = TextKey.id(root.id, "/Classic/Tribute", title, performer, "")
+                let album = Album(id: oldID, rootID: root.id, sectionID: section.id, folder: music.appendingPathComponent("Classic/Tribute").path, title: title, artist: performer)
+                let track = Track(id: TextKey.id(root.id, relative), rootID: root.id, albumID: oldID, relativePath: relative, title: "Piece \(disc)-\(number)", number: number, disc: disc, duration: 1, size: Int64(values.fileSize!), modified: values.contentModificationDate!.timeIntervalSince1970, tags: tags, credits: [Credit(artistID: TextKey.id(oldID, "performer", performer), name: performer, role: "performer")])
+                if fragments[oldID] == nil { fragments[oldID] = (album, []) }
+                fragments[oldID]!.1.append(track)
+            }
+        }
+        for (album, tracks) in fragments.values { try await seed!.upsert(album: album, tracks: tracks, scanID: "old") }
+        #expect(try await seed!.albums().count == 8)
+        let originalTracks = fragments.values.flatMap { $0.1 }.sorted { $0.id < $1.id }
+        let favorite = try #require(fragments.values.first { $0.0.artist == "Kreisler" })
+        let aliasTrack = try #require(fragments.values.first { $0.0.artist == "Ricci" }?.1.first), artistID = aliasTrack.credits[0].artistID
+        try await seed!.setFavorite(favorite.0.id, value: true)
+        try await seed!.editAlbum(favorite.0.id, title: "My Tribute CD1", artist: "My compilation", sectionID: section.id)
+        try await seed!.addAlias(artistID: artistID, alias: "Legacy alias")
+        let queue = QueueSnapshot(entries: originalTracks.prefix(3).map { QueueEntry(trackID: $0.id) }, index: 1, position: 12)
+        try await seed!.setPreference("queue", value: queue)
+        let candidate = ReleaseCandidate(id: "partial", title: favorite.0.title, artist: favorite.0.artist, date: "", barcode: "", trackCount: favorite.1.count, score: 100, reasons: [], country: "", disambiguation: "")
+        let match = ReleaseMatch(candidate: candidate, tracks: favorite.1.map { MatchedTrack(disc: $0.disc, number: $0.number, title: $0.title, recordingID: "remote-" + $0.id, credits: [], works: []) })
+        try await seed!.confirmMatch(albumID: favorite.0.id, match: match)
+        let insight = Insight(entityID: favorite.0.id, kind: "album", language: "ko", payload: InsightPayload(sections: [], claims: [], uncertainties: []), evidence: [], model: "fixture")
+        try await seed!.saveInsight(insight)
+        seed = nil
+        // Recreate the pre-fix schema in this disposable fixture, then exercise the real migration.
+        let raw = try DatabaseQueue(path: dir.appendingPathComponent("test.sqlite").path)
+        try await raw.write { db in
+            try db.execute(sql: "DROP INDEX album_grouping; ALTER TABLE album DROP COLUMN groupingKey; DROP TABLE albumMergeArchive; DELETE FROM grdb_migrations WHERE identifier='v3-album-grouping'")
+        }
+        let beforeBytes = try Data(contentsOf: music.appendingPathComponent(aliasTrack.relativePath))
+        let db = try database(dir), albums = try await db.albums()
+        #expect(albums.count == 2); #expect(albums.map(\.trackCount).sorted() == [20, 22])
+        #expect(albums.first { $0.id == favorite.0.id }?.favorite == true)
+        #expect(albums.first { $0.id == favorite.0.id }?.title == "My Tribute CD1")
+        #expect(albums.first { $0.id != favorite.0.id }?.artist == "Various Artists")
+        for original in originalTracks {
+            let track = try #require(try await db.track(original.id))
+            #expect(track.tags == original.tags); #expect(track.credits == original.credits)
+            #expect(track.relativePath == original.relativePath); #expect(albums.contains { $0.id == track.albumID })
+        }
+        let restored = try #require(try await db.preference("queue", as: QueueSnapshot.self))
+        #expect(restored.entries == queue.entries); #expect(restored.index == queue.index); #expect(restored.position == 12)
+        #expect(try await db.artist(artistID)?.aliases == ["Legacy alias"])
+        #expect(try await db.confirmedMatch(favorite.0.id) == nil)
+        #expect(try await db.insight(entityID: favorite.0.id, language: "ko") == nil)
+        let archived = try await raw.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM albumMergeArchive") }
+        #expect(archived == 8)
+        let oldWorks = try await db.works(trackID: aliasTrack.id)
+        let scanner = LibraryScanner(database: db, cache: dir.appendingPathComponent("cache"))
+        let rescanned = try await scanner.scan(root: root) { _ in }
+        #expect(rescanned.reused == 42)
+        #expect(try Data(contentsOf: music.appendingPathComponent(aliasTrack.relativePath)) == beforeBytes)
+        try writeAudio(music, path: aliasTrack.relativePath, tags: aliasTrack.tags.flatMap { k, vs in vs.map { k + "=" + $0 } } + ["COMMENT=changed"])
+        _ = try await scanner.scan(root: root) { _ in }
+        #expect(try await db.albums().count == 2)
+        #expect(try await db.track(aliasTrack.id)?.credits == aliasTrack.credits)
+        #expect(try await db.works(trackID: aliasTrack.id).map(\.id) == oldWorks.map(\.id))
+        #expect(try await db.search("Tribute").filter { $0.kind == "album" }.count == 2)
+        #expect(try await db.integrityCheck() == "ok")
+        let reopened = try database(dir)
+        #expect(try await reopened.albums().map(\.id) == albums.map(\.id))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).contains { $0.contains("before-migration") })
     }
     @Test func testDisconnectAndPartialFailurePreserveIndex() async throws {
         let dir = try temporary(), music = dir.appendingPathComponent("music")

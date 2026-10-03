@@ -19,6 +19,8 @@ public actor LibraryScanner {
         var sections = Dictionary(uniqueKeysWithValues: existingSections.filter { $0.rootID == root.id }.map { ($0.relativePath, $0) })
         var folderAssets: [String: (URL?, [String])] = [:]
         var pending: [String: (Album, [Track])] = [:]
+        var identities = try await db.albumIdentities(rootID: root.id)
+        var groupingKeys: [String: String] = [:]
         do {
             while let url = enumerator.nextObject() as? URL {
                 try Task.checkCancellation()
@@ -30,7 +32,8 @@ public actor LibraryScanner {
                 }
                 guard formats.contains(url.pathExtension.lowercased()), !url.lastPathComponent.hasPrefix("._") else { continue }
                 state.discovered += 1; state.current = url.lastPathComponent
-                let relative = String(url.path.dropFirst(root.path.hasSuffix("/") ? root.path.count : root.path.count + 1)), parts = relative.split(separator: "/")
+                // Foundation may enumerate /var as /private/var; depth keeps the stored path root-relative.
+                let relative = url.pathComponents.suffix(enumerator.level).joined(separator: "/"), parts = relative.split(separator: "/")
                 let sectionPath = parts.count > 1 ? String(parts[0]) : ""
                 if sections[sectionPath] == nil {
                     let name = sectionPath.isEmpty ? rootURL.lastPathComponent : sectionPath.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
@@ -38,7 +41,8 @@ public actor LibraryScanner {
                     try await db.saveSection(section); sections[sectionPath] = section
                 }
                 let trackID = TextKey.id(root.id, relative)
-                if let old = try await db.track(trackID), old.size == Int64(values.fileSize ?? 0), old.modified == values.contentModificationDate?.timeIntervalSince1970,
+                let existingTrack = try await db.track(trackID)
+                if let old = existingTrack, old.size == Int64(values.fileSize ?? 0), old.modified == values.contentModificationDate?.timeIntervalSince1970,
                    let oldAlbum = try await db.album(old.albumID), oldAlbum.artwork.map({ fm.fileExists(atPath: $0) }) ?? true {
                     try await db.markSeen(trackID: trackID, scanID: scanID); state.reused += 1; state.processed += 1
                 } else {
@@ -47,8 +51,9 @@ public actor LibraryScanner {
                         let groupedFolder = Self.albumFolder(folder)
                         let albumTitle = metadata.value("ALBUM").isEmpty ? groupedFolder.lastPathComponent : metadata.value("ALBUM")
                         let albumArtist = metadata.value("ALBUMARTIST", "ALBUM ARTIST", "ARTIST").isEmpty ? groupedFolder.deletingLastPathComponent().lastPathComponent : metadata.value("ALBUMARTIST", "ALBUM ARTIST", "ARTIST")
-                        let groupRelative = String(groupedFolder.path.dropFirst(root.path.count))
-                        let albumID = TextKey.id(root.id, groupRelative, albumTitle, albumArtist, metadata.value("BARCODE", "UPC"))
+                        let groupingKey = AlbumGrouping.key(root: root, relativePath: relative, tags: metadata.tags)
+                        let albumID = identities[groupingKey] ?? groupingKey
+                        identities[groupingKey] = albumID; groupingKeys[albumID] = groupingKey
                         if folderAssets[groupedFolder.path] == nil { folderAssets[groupedFolder.path] = Self.assets(groupedFolder) }
                         let assets = folderAssets[groupedFolder.path]!
                         let imageURL = assets.0 ?? Self.assets(folder).0
@@ -64,7 +69,8 @@ public actor LibraryScanner {
                         for (tag, role) in roleTags {
                             for name in metadata.tags[tag] ?? [] where !name.isEmpty {
                                 // Provisional identities stay album-scoped; names alone never merge people across albums.
-                                credits.append(Credit(artistID: TextKey.id(albumID, role, name), name: name, role: role))
+                                let artistID = existingTrack?.credits.first { $0.source == "local" && $0.role == role && $0.name == name }?.artistID ?? TextKey.id(albumID, role, name)
+                                credits.append(Credit(artistID: artistID, name: name, role: role))
                             }
                         }
                         if !credits.contains(where: { $0.role == "performer" }) { credits.append(Credit(artistID: TextKey.id(albumID, "performer", albumArtist), name: albumArtist, role: "performer")) }
@@ -76,16 +82,16 @@ public actor LibraryScanner {
                     catch { state.errors.append("\(relative): \(error.localizedDescription)") }
                 }
                 if state.discovered % 25 == 0 {
-                    for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID) }; pending.removeAll()
+                    for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID, groupingKey: groupingKeys[album.id]) }; pending.removeAll()
                     state.albums = try await db.counts().albums; await progress(state); await Task.yield()
                 }
             }
-            for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID) }
+            for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID, groupingKey: groupingKeys[album.id]) }
             // Any failed subtree keeps its previous availability. No deletion on a partial scan.
             if walkErrors.isEmpty && state.errors.isEmpty { try await db.reconcile(rootID: root.id, scanID: scanID) }
             state.errors += walkErrors; state.finished = true
         } catch is CancellationError {
-            for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID) }
+            for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID, groupingKey: groupingKeys[album.id]) }
             state.cancelled = true
         }
         state.albums = try await db.counts().albums

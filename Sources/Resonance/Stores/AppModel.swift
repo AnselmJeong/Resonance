@@ -48,7 +48,22 @@ final class AppModel {
     private var watchTask: Task<Void, Never>?
     private var notifications: [NSObjectProtocol] = []
     var sectionID: String? { sections.contains { $0.id == selection } ? selection : nil }
-    var header: String { selection == "favorites" ? "즐겨찾기" : selection == "artists" ? "음악가" : sections.first { $0.id == selection }?.name ?? "모든 앨범" }
+    var rootID: String? { roots.first { $0.navigationID == selection }?.id }
+    var collectionRoot: LibraryRoot? {
+        let id = rootID ?? sections.first { $0.id == selection }?.rootID
+        return roots.first { $0.id == id }
+    }
+    var visibleSections: [LibrarySection] {
+        guard let root = collectionRoot else { return [] }
+        return sections.filter { !$0.hidden && $0.rootID == root.id }
+    }
+    var hasSearchScope: Bool { rootID != nil || sectionID != nil }
+    var searchScopeLabel: String { rootID != nil ? "현재 폴더만" : "현재 컬렉션만" }
+    var header: String { selection == "favorites" ? "즐겨찾기" : selection == "artists" ? "음악가" : roots.first { $0.navigationID == selection }?.name ?? sections.first { $0.id == selection }?.name ?? "모든 앨범" }
+    var librarySubtitle: String {
+        if let root = collectionRoot { return sectionID == nil ? root.path : "\(root.name) · 하위 컬렉션" }
+        return "커버에서 시작하는 나만의 음악 컬렉션"
+    }
     var connected: Bool { roots.allSatisfy { $0.status == "연결됨" } }
 
     init() throws {
@@ -135,7 +150,7 @@ final class AppModel {
             roots.removeAll { $0.id == root.id }
             await playback.removeTracks(trackIDs)
             scopedURLs.removeValue(forKey: root.id)?.stopAccessingSecurityScopedResource()
-            if sections.contains(where: { $0.rootID == root.id && $0.id == selection }) { selection = "all" }
+            if selection == root.navigationID || sections.contains(where: { $0.rootID == root.id && $0.id == selection }) { selection = "all" }
             destination = .library; history.removeAll(); future.removeAll()
             await reload()
         } catch { self.error = error.localizedDescription }
@@ -154,11 +169,11 @@ final class AppModel {
         defer { if token == refreshGeneration { loading = false } }
         do {
             if !query.isEmpty {
-                let hits = try await db.search(query, sectionID: searchSection ? sectionID : nil, role: roleFilter == "all" ? nil : roleFilter, format: formatFilter == "all" ? nil : formatFilter)
+                let hits = try await db.search(query, rootID: searchSection ? rootID : nil, sectionID: searchSection ? sectionID : nil, role: roleFilter == "all" ? nil : roleFilter, format: formatFilter == "all" ? nil : formatFilter)
                 guard token == refreshGeneration else { return }; searchHits = hits; return
             }
             if selection == "artists" { let result = try await db.artists(limit: 500); guard token == refreshGeneration else { return }; people = result; return }
-            let page = try await db.albums(sectionID: sectionID, favorites: selection == "favorites", sort: sort, offset: more ? albums.count : 0)
+            let page = try await db.albums(rootID: rootID, sectionID: sectionID, favorites: selection == "favorites", sort: sort, offset: more ? albums.count : 0)
             guard token == refreshGeneration else { return }
             albums = more ? albums + page : page; canLoadMore = page.count == 120
         } catch { if token == refreshGeneration { self.error = error.localizedDescription } }
@@ -166,7 +181,7 @@ final class AppModel {
     func scheduleSearch() {
         queryTask?.cancel(); queryTask = Task { try? await Task.sleep(nanoseconds: 180_000_000); guard !Task.isCancelled else { return }; destination = .library; await refreshGrid() }
     }
-    func selectSection(_ id: String) { selection = id; query = ""; go(.library); Task { await refreshGrid() } }
+    func selectSection(_ id: String) { selection = id; query = ""; searchSection = hasSearchScope; go(.library); Task { await refreshGrid() } }
     func go(_ next: Destination) { if destination != next { history.append(destination); future.removeAll(); destination = next } }
     func back() { guard let next = history.popLast() else { return }; future.append(destination); destination = next }
     func forward() { guard let next = future.popLast() else { return }; history.append(destination); destination = next }

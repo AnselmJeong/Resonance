@@ -7,6 +7,8 @@ public struct LibraryRoot: Codable, Identifiable, Hashable, Sendable {
     public var volumeID: String?
     public var exclusions = ["__backup__", "lost+found", "Covers", "@eaDir", "$RECYCLE.BIN"]
     public var status = "연결됨"
+    public var name: String { URL(fileURLWithPath: path).lastPathComponent }
+    public var navigationID: String { "root:" + id }
     public init(path: String, bookmark: Data? = nil, volumeID: String? = nil) { self.path = path; self.bookmark = bookmark; self.volumeID = volumeID }
 }
 

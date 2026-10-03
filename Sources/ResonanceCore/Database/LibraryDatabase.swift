@@ -49,6 +49,7 @@ public actor LibraryDatabase {
                 try db.execute(sql: "UPDATE searchContent SET titleKey=? WHERE id=?", arguments: [TextKey.normalize(title), id])
             }
         }
+        migrator.registerMigration("v3-album-grouping") { db in try AlbumGroupingMigration.migrate(db) }
         if hadDatabase, try !pool.read({ try migrator.hasCompletedMigrations($0) }) {
             let backupPath = path + ".before-migration-\(Int(Date().timeIntervalSince1970)).sqlite"
             try pool.backup(to: DatabaseQueue(path: backupPath))
@@ -107,6 +108,7 @@ public actor LibraryDatabase {
             try db.execute(sql: "DELETE FROM album WHERE rootID=?", arguments: [rootID])
             try db.execute(sql: "DELETE FROM section WHERE rootID=?", arguments: [rootID])
             try db.execute(sql: "DELETE FROM scanRun WHERE rootID=?", arguments: [rootID])
+            try db.execute(sql: "DELETE FROM albumMergeArchive WHERE rootID=?", arguments: [rootID])
             try db.execute(sql: "DELETE FROM root WHERE id=?", arguments: [rootID])
             // A shared work's search link may have pointed at the removed album.
             try db.execute(sql: """
@@ -120,9 +122,10 @@ public actor LibraryDatabase {
     public func saveSection(_ value: LibrarySection) throws {
         try pool.write { db in try db.execute(sql: "INSERT INTO section(id,rootID,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", arguments: [value.id, value.rootID, try json(value)]) }
     }
-    public func albums(sectionID: String? = nil, favorites: Bool = false, sort: String = "title", limit: Int = 120, offset: Int = 0) throws -> [Album] {
+    public func albums(rootID: String? = nil, sectionID: String? = nil, favorites: Bool = false, sort: String = "title", limit: Int = 120, offset: Int = 0) throws -> [Album] {
         let ordering = ["title": "title COLLATE NOCASE", "artist": "artist COLLATE NOCASE,title", "date": "date DESC,title"][sort] ?? "title"
         var conditions: [String] = []; var args: [DatabaseValue] = []
+        if let rootID { conditions.append("rootID=?"); args.append(rootID.databaseValue) }
         if let sectionID { conditions.append("sectionID=?"); args.append(sectionID.databaseValue) }
         if favorites { conditions.append("favorite=1") }
         let visible = try sections().filter { !$0.hidden }.map(\.id)
@@ -135,6 +138,11 @@ public actor LibraryDatabase {
         try pool.read { db in (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM album") ?? 0, try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM track") ?? 0) }
     }
     public func album(_ id: String) throws -> Album? { try list(Album.self, sql: "SELECT data FROM album WHERE id=?", args: [id]).first }
+    public func albumIdentities(rootID: String) throws -> [String: String] {
+        try pool.read { db in
+            Dictionary(uniqueKeysWithValues: try Row.fetchAll(db, sql: "SELECT groupingKey,id FROM album WHERE rootID=? AND groupingKey IS NOT NULL", arguments: [rootID]).map { ($0["groupingKey"] as String, $0["id"] as String) })
+        }
+    }
     public func track(_ id: String) throws -> Track? { try list(Track.self, sql: "SELECT data FROM track WHERE id=?", args: [id]).first }
     public func tracks(albumID: String) throws -> [Track] { try list(Track.self, sql: "SELECT data FROM track WHERE albumID=? ORDER BY disc,number,path", args: [albumID]) }
     public func artist(_ id: String) throws -> Artist? { try list(Artist.self, sql: "SELECT data FROM artist WHERE id=?", args: [id]).first }
@@ -149,7 +157,7 @@ public actor LibraryDatabase {
         try list(Track.self, sql: "SELECT t.data FROM track t JOIN recording r ON r.trackID=t.id JOIN recordingWork rw ON rw.recordingID=r.id WHERE rw.workID=? ORDER BY t.albumID,t.disc,t.number LIMIT 500", args: [id])
     }
 
-    public func upsert(album incoming: Album, tracks: [Track], scanID: String) throws {
+    public func upsert(album incoming: Album, tracks: [Track], scanID: String, groupingKey: String? = nil) throws {
         try pool.write { db in
             var album = incoming
             if let old = try String.fetchOne(db, sql: "SELECT data FROM album WHERE id=?", arguments: [album.id]) { album.favorite = try decode(Album.self, old).favorite }
@@ -159,6 +167,7 @@ public actor LibraryDatabase {
                 if field == "title" { album.title = value }; if field == "artist" { album.artist = value }; if field == "artwork" { album.artwork = value }; if field == "sectionID" { album.sectionID = value }
             }
             try db.execute(sql: "INSERT INTO album(id,rootID,sectionID,title,artist,date,favorite,data) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sectionID=excluded.sectionID,title=excluded.title,artist=excluded.artist,date=excluded.date,favorite=excluded.favorite,data=excluded.data", arguments: [album.id, album.rootID, album.sectionID, album.title, album.artist, album.date, album.favorite, try json(album)])
+            if let groupingKey { try db.execute(sql: "UPDATE album SET groupingKey=? WHERE id=?", arguments: [groupingKey, album.id]) }
             for var track in tracks {
                 // Confirmed external credits are assertions, independent of scanner input.
                 let remoteCredits = try Row.fetchAll(db, sql: "SELECT a.data,c.role,c.source FROM artist a JOIN credit c ON c.artistID=a.id WHERE c.trackID=? AND c.source != 'local'", arguments: [track.id])
@@ -175,26 +184,30 @@ public actor LibraryDatabase {
                     try db.execute(sql: "INSERT OR IGNORE INTO artist(id,name,role,data) VALUES(?,?,?,?)", arguments: [artist.id, artist.name, artist.role, try json(artist)])
                     if let saved = try String.fetchOne(db, sql: "SELECT data FROM artist WHERE id=?", arguments: [artist.id]) { artist = try decode(Artist.self, saved) }
                     try db.execute(sql: "INSERT OR IGNORE INTO credit(trackID,artistID,role,source) VALUES(?,?,?,?)", arguments: [track.id, credit.artistID, credit.role, credit.source])
-                    try index(db, id: artist.id, kind: "artist", title: artist.name, subtitle: ([credit.roleLabel] + artist.aliases).joined(separator: " "), role: credit.role)
+                    try Self.index(db, id: artist.id, kind: "artist", title: artist.name, subtitle: ([credit.roleLabel] + artist.aliases).joined(separator: " "), role: credit.role)
                 }
                 if let title = track.tags["WORK"]?.first, !title.isEmpty {
-                    let work = Work(id: TextKey.id(album.id, "work", title), title: title)
+                    let workID = try String.fetchOne(db, sql: "SELECT w.id FROM work w JOIN recordingWork rw ON rw.workID=w.id WHERE rw.recordingID=? AND rw.source='local' AND w.title=? LIMIT 1", arguments: [track.recordingID, title]) ?? TextKey.id(album.id, "work", title)
+                    let work = Work(id: workID, title: title)
                     try db.execute(sql: "INSERT OR REPLACE INTO work(id,title,data) VALUES(?,?,?)", arguments: [work.id, title, try json(work)])
                     try db.execute(sql: "INSERT OR IGNORE INTO recordingWork(recordingID,workID,source) VALUES(?,?,'local')", arguments: [track.recordingID, work.id])
-                    try index(db, id: work.id, kind: "work", title: title, subtitle: album.artist, albumID: album.id, sectionID: album.sectionID)
+                    try Self.index(db, id: work.id, kind: "work", title: title, subtitle: album.artist, albumID: album.id, sectionID: album.sectionID)
                 }
-                try index(db, id: track.id, kind: "track", title: track.title, subtitle: ([album.title, album.artist, album.label] + track.credits.map(\.name)).joined(separator: " · "), albumID: album.id, sectionID: album.sectionID, format: track.format)
             }
             let stored = try String.fetchAll(db, sql: "SELECT data FROM track WHERE albumID=?", arguments: [album.id]).map { try decode(Track.self, $0) }
             album.trackCount = stored.count; album.duration = stored.reduce(0) { $0 + $1.duration }
-            try db.execute(sql: "UPDATE album SET data=? WHERE id=?", arguments: [try json(album), album.id])
-            try index(db, id: album.id, kind: "album", title: album.title, subtitle: [album.artist, album.label, album.date].joined(separator: " · "), albumID: album.id, sectionID: album.sectionID)
+            if !overrides.contains(where: { ($0["field"] as String) == "artist" }) { album.artist = AlbumGrouping.artist(tracks: stored, fallback: album.artist) }
+            try db.execute(sql: "UPDATE album SET artist=?,data=? WHERE id=?", arguments: [album.artist, try json(album), album.id])
+            for track in stored {
+                try Self.index(db, id: track.id, kind: "track", title: track.title, subtitle: ([album.title, album.artist, album.label] + track.credits.map(\.name)).joined(separator: " · "), albumID: album.id, sectionID: album.sectionID, format: track.format)
+            }
+            try Self.index(db, id: album.id, kind: "album", title: album.title, subtitle: [album.artist, album.label, album.date].joined(separator: " · "), albumID: album.id, sectionID: album.sectionID)
         }
     }
 
-    private func index(_ db: Database, id: String, kind: String, title: String, subtitle: String, albumID: String? = nil, sectionID: String? = nil, format: String? = nil, role: String? = nil) throws {
+    static func index(_ db: Database, id: String, kind: String, title: String, subtitle: String, albumID: String? = nil, sectionID: String? = nil, format: String? = nil, role: String? = nil) throws {
         let normalized = TextKey.normalize(title + " " + subtitle)
-        if let row = try Row.fetchOne(db, sql: "SELECT * FROM searchContent WHERE entityID=? AND kind=?", arguments: [id, kind]), (row["normalized"] as String) == normalized, (row["sectionID"] as String?) == sectionID { return }
+        if let row = try Row.fetchOne(db, sql: "SELECT * FROM searchContent WHERE entityID=? AND kind=?", arguments: [id, kind]), (row["normalized"] as String) == normalized, (row["sectionID"] as String?) == sectionID, (row["albumID"] as String?) == albumID, (row["format"] as String?) == format, (row["role"] as String?) == role { return }
         try db.execute(sql: "INSERT INTO searchContent(entityID,kind,title,subtitle,normalized,albumID,sectionID,format,role,titleKey) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entityID,kind) DO UPDATE SET title=excluded.title,subtitle=excluded.subtitle,normalized=excluded.normalized,albumID=excluded.albumID,sectionID=excluded.sectionID,format=excluded.format,role=excluded.role,titleKey=excluded.titleKey", arguments: [id, kind, title, subtitle, normalized, albumID, sectionID, format, role, TextKey.normalize(title)])
         let docID = try Int64.fetchOne(db, sql: "SELECT id FROM searchContent WHERE entityID=? AND kind=?", arguments: [id, kind])!
         try db.execute(sql: "DELETE FROM searchFTS WHERE rowid=?", arguments: [docID])
@@ -203,7 +216,7 @@ public actor LibraryDatabase {
         for gram in TextKey.grams(title + " " + subtitle) { try db.execute(sql: "INSERT INTO searchGram(gram,docID) VALUES(?,?)", arguments: [gram, docID]) }
     }
 
-    public func search(_ text: String, sectionID: String? = nil, role: String? = nil, format: String? = nil, limit: Int = 80) throws -> [SearchHit] {
+    public func search(_ text: String, rootID: String? = nil, sectionID: String? = nil, role: String? = nil, format: String? = nil, limit: Int = 80) throws -> [SearchHit] {
         let normalized = TextKey.normalize(text), grams = TextKey.queryGrams(text)
         guard !grams.isEmpty else { return [] }
         return try pool.read { db in
@@ -212,6 +225,14 @@ public actor LibraryDatabase {
             var sql = "SELECT c.* FROM searchContent c WHERE (c.id IN (SELECT rowid FROM searchFTS WHERE searchFTS MATCH ?) OR (c.id IN (SELECT docID FROM searchGram WHERE gram=?) AND instr(c.normalized,?)>0))"
             var args: [DatabaseValue] = [TextKey.fts(text).databaseValue, anchor.databaseValue, normalized.databaseValue]
             sql += " AND (c.kind<>'artist' OR EXISTS(SELECT 1 FROM credit WHERE artistID=c.entityID)) AND (c.kind<>'work' OR EXISTS(SELECT 1 FROM recordingWork WHERE workID=c.entityID))"
+            if let rootID {
+                sql += """
+                 AND ((c.kind IN ('album','track') AND EXISTS(SELECT 1 FROM album a WHERE a.id=c.albumID AND a.rootID=?))
+                   OR (c.kind='artist' AND EXISTS(SELECT 1 FROM credit cr JOIN track t ON t.id=cr.trackID WHERE cr.artistID=c.entityID AND t.rootID=?))
+                   OR (c.kind='work' AND EXISTS(SELECT 1 FROM recordingWork rw JOIN recording r ON r.id=rw.recordingID JOIN track t ON t.id=r.trackID WHERE rw.workID=c.entityID AND t.rootID=?)))
+                """
+                args += Array(repeating: rootID.databaseValue, count: 3)
+            }
             if let sectionID {
                 sql += " AND (c.sectionID=? OR (c.kind='artist' AND EXISTS(SELECT 1 FROM credit cr JOIN track t ON t.id=cr.trackID JOIN album a ON a.id=t.albumID WHERE cr.artistID=c.entityID AND a.sectionID=?)))"
                 args += [sectionID.databaseValue, sectionID.databaseValue]
@@ -253,7 +274,7 @@ public actor LibraryDatabase {
             var fields = ["title": title, "artist": artist, "sectionID": sectionID]; if let artwork { fields["artwork"] = artwork }
             for (field, value) in fields { try db.execute(sql: "INSERT OR REPLACE INTO assertion(entityID,field,value,source) VALUES(?,?,?,'user')", arguments: [id, field, value]) }
             try db.execute(sql: "UPDATE album SET title=?,artist=?,sectionID=?,data=? WHERE id=?", arguments: [title, artist, sectionID, try json(album), id])
-            try index(db, id: id, kind: "album", title: title, subtitle: [artist, album.label, album.date].joined(separator: " · "), albumID: id, sectionID: sectionID)
+            try Self.index(db, id: id, kind: "album", title: title, subtitle: [artist, album.label, album.date].joined(separator: " · "), albumID: id, sectionID: sectionID)
         }
     }
     public func addAlias(artistID: String, alias: String) throws {
@@ -261,7 +282,7 @@ public actor LibraryDatabase {
         artist.aliases = Array(Set(artist.aliases + [alias]))
         try pool.write { db in
             try db.execute(sql: "UPDATE artist SET data=? WHERE id=?", arguments: [try json(artist), artistID])
-            try index(db, id: artistID, kind: "artist", title: artist.name, subtitle: ([artist.role] + artist.aliases).joined(separator: " "), role: artist.role)
+            try Self.index(db, id: artistID, kind: "artist", title: artist.name, subtitle: ([artist.role] + artist.aliases).joined(separator: " "), role: artist.role)
         }
     }
     public func preference<T: Decodable>(_ key: String, as type: T.Type) throws -> T? {
@@ -306,15 +327,15 @@ public actor LibraryDatabase {
                     let artist = Artist(id: credit.artistID, name: credit.name, role: credit.role, externalID: String(credit.artistID.dropFirst(3)))
                     try db.execute(sql: "INSERT OR IGNORE INTO artist(id,name,role,data) VALUES(?,?,?,?)", arguments: [artist.id, artist.name, artist.role, try json(artist)])
                     try db.execute(sql: "INSERT OR IGNORE INTO credit(trackID,artistID,role,source) VALUES(?,?,?,'musicbrainz')", arguments: [track.id, artist.id, credit.role])
-                    try index(db, id: artist.id, kind: "artist", title: artist.name, subtitle: credit.roleLabel, role: credit.role)
+                    try Self.index(db, id: artist.id, kind: "artist", title: artist.name, subtitle: credit.roleLabel, role: credit.role)
                 }
                 for work in remote.works {
                     try db.execute(sql: "INSERT OR REPLACE INTO work(id,title,data) VALUES(?,?,?)", arguments: [work.id, work.title, try json(work)])
                     try db.execute(sql: "INSERT OR IGNORE INTO recordingWork(recordingID,workID,source) VALUES(?,?,'musicbrainz')", arguments: [track.recordingID, work.id])
-                    try index(db, id: work.id, kind: "work", title: work.title, subtitle: "MusicBrainz · 작품", albumID: albumID)
+                    try Self.index(db, id: work.id, kind: "work", title: work.title, subtitle: "MusicBrainz · 작품", albumID: albumID)
                 }
                 if let album = try String.fetchOne(db, sql: "SELECT data FROM album WHERE id=?", arguments: [albumID]).map({ try decode(Album.self, $0) }) {
-                    try index(db, id: track.id, kind: "track", title: track.title, subtitle: ([album.title, album.artist, album.label] + track.credits.map(\.name)).joined(separator: " · "), albumID: albumID, sectionID: album.sectionID, format: track.format)
+                    try Self.index(db, id: track.id, kind: "track", title: track.title, subtitle: ([album.title, album.artist, album.label] + track.credits.map(\.name)).joined(separator: " · "), albumID: albumID, sectionID: album.sectionID, format: track.format)
                 }
             }
         }
@@ -330,7 +351,7 @@ public actor LibraryDatabase {
                 try db.execute(sql: "DELETE FROM credit WHERE trackID=? AND source='musicbrainz'", arguments: [track.id])
                 try db.execute(sql: "DELETE FROM recordingWork WHERE recordingID=? AND source='musicbrainz'", arguments: [track.recordingID])
                 try db.execute(sql: "UPDATE recording SET mbid=NULL WHERE trackID=?", arguments: [track.id])
-                try index(db, id: track.id, kind: "track", title: track.title, subtitle: ([album.title, album.artist, album.label] + track.credits.map(\.name)).joined(separator: " · "), albumID: album.id, sectionID: album.sectionID, format: track.format)
+                try Self.index(db, id: track.id, kind: "track", title: track.title, subtitle: ([album.title, album.artist, album.label] + track.credits.map(\.name)).joined(separator: " · "), albumID: album.id, sectionID: album.sectionID, format: track.format)
             }
         }
     }
