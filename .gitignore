@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+dist/
+.DS_Store
+*.flac
+*.mp3
+!Tests/Fixtures/*.mp3
+*.ape
+Alexandre Tharaud/
+.env*
+*.sqlite*
+*.key
