@@ -29,7 +29,13 @@ public enum TextKey {
 
 public enum AppPaths {
     public static var support: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Resonance", isDirectory: true)
+        #if DEBUG
+        // A separate database lets desktop smoke tests exercise PDFs and navigation without modifying a user's library.
+        if let path = ProcessInfo.processInfo.environment["RESONANCE_DATA_DIRECTORY"], path.hasPrefix("/") {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        #endif
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Resonance", isDirectory: true)
     }
     public static var cache: URL { support.appendingPathComponent("Artwork", isDirectory: true) }
     public static func prepare() throws {

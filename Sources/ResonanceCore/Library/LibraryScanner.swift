@@ -13,35 +13,46 @@ public actor LibraryScanner {
         guard fm.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else { throw AppError.message("라이브러리가 연결되어 있지 않습니다. 이전 색인은 유지됩니다.") }
         let volume = try rootURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString
         if let expected = root.volumeID, let volume, expected != volume { throw AppError.message("등록한 볼륨과 다릅니다. 이전 색인을 유지합니다.") }
-        var walkErrors: [String] = []
-        guard let enumerator = fm.enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles], errorHandler: { url, _ in walkErrors.append("읽기 실패: \(url.lastPathComponent)"); return true }) else { throw AppError.message("폴더를 읽을 수 없습니다.") }
+        var walkErrors: [String] = [], coverage = ScanCoverage()
+        let resolvedRoot = rootURL.resolvingSymlinksInPath().path
+        func relativeFailurePath(_ url: URL) -> String {
+            for base in [root.path, resolvedRoot] where url.path.hasPrefix(base + "/") { return String(url.path.dropFirst(base.count + 1)) }
+            return "" // Unknown coverage protects the whole root.
+        }
+        guard let enumerator = fm.enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles], errorHandler: { url, _ in walkErrors.append("읽기 실패: \(url.lastPathComponent)"); coverage.protectedPaths.insert(relativeFailurePath(url)); return true }) else { throw AppError.message("폴더를 읽을 수 없습니다.") }
         let existingSections = try await db.sections()
         var sections = Dictionary(uniqueKeysWithValues: existingSections.filter { $0.rootID == root.id }.map { ($0.relativePath, $0) })
         var folderAssets: [String: (URL?, [String])] = [:]
         var pending: [String: (Album, [Track])] = [:]
         var identities = try await db.albumIdentities(rootID: root.id)
+        let existingTracks = try await db.scanTracks(rootID: root.id)
         var groupingKeys: [String: String] = [:]
         do {
             while let url = enumerator.nextObject() as? URL {
                 try Task.checkCancellation()
-                let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey])
-                if values.isSymbolicLink == true { if values.isDirectory == true { enumerator.skipDescendants() }; continue }
+                // Foundation may enumerate /var as /private/var; use traversal depth for relative paths.
+                let relative = url.pathComponents.suffix(enumerator.level).joined(separator: "/"), parts = relative.split(separator: "/")
+                let values: URLResourceValues
+                do { values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]) }
+                catch { coverage.protectedPaths.insert(relative); state.errors.append("\(relative): \(error.localizedDescription)"); continue }
+                if values.isSymbolicLink == true { coverage.protectedPaths.insert(relative); if values.isDirectory == true { enumerator.skipDescendants() }; continue }
                 if values.isDirectory == true {
-                    if root.exclusions.contains(where: { $0.caseInsensitiveCompare(url.lastPathComponent) == .orderedSame }) { enumerator.skipDescendants() }
+                    coverage.folders.insert(relative)
+                    if root.exclusions.contains(where: { $0.caseInsensitiveCompare(url.lastPathComponent) == .orderedSame }) { coverage.protectedPaths.insert(relative); enumerator.skipDescendants() }
                     continue
                 }
+                coverage.files.insert(relative)
                 guard formats.contains(url.pathExtension.lowercased()), !url.lastPathComponent.hasPrefix("._") else { continue }
                 state.discovered += 1; state.current = url.lastPathComponent
-                // Foundation may enumerate /var as /private/var; depth keeps the stored path root-relative.
-                let relative = url.pathComponents.suffix(enumerator.level).joined(separator: "/"), parts = relative.split(separator: "/")
                 let sectionPath = parts.count > 1 ? String(parts[0]) : ""
                 if sections[sectionPath] == nil {
                     let name = sectionPath.isEmpty ? rootURL.lastPathComponent : sectionPath.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
                     let section = LibrarySection(rootID: root.id, relativePath: sectionPath, name: name)
                     try await db.saveSection(section); sections[sectionPath] = section
                 }
-                let trackID = TextKey.id(root.id, relative)
-                let existingTrack = try await db.track(trackID)
+                let existingTrack = existingTracks[relative]
+                // IDs survive moves; a path hash could collide when a file moves back to an earlier path.
+                let trackID = existingTrack?.id ?? UUID().uuidString
                 if let old = existingTrack, old.size == Int64(values.fileSize ?? 0), old.modified == values.contentModificationDate?.timeIntervalSince1970,
                    let oldAlbum = try await db.album(old.albumID), oldAlbum.artwork.map({ fm.fileExists(atPath: $0) }) ?? true {
                     try await db.markSeen(trackID: trackID, scanID: scanID); state.reused += 1; state.processed += 1
@@ -52,7 +63,7 @@ public actor LibraryScanner {
                         let albumTitle = metadata.value("ALBUM").isEmpty ? groupedFolder.lastPathComponent : metadata.value("ALBUM")
                         let albumArtist = metadata.value("ALBUMARTIST", "ALBUM ARTIST", "ARTIST").isEmpty ? groupedFolder.deletingLastPathComponent().lastPathComponent : metadata.value("ALBUMARTIST", "ALBUM ARTIST", "ARTIST")
                         let groupingKey = AlbumGrouping.key(root: root, relativePath: relative, tags: metadata.tags)
-                        let albumID = identities[groupingKey] ?? groupingKey
+                        let albumID = identities[groupingKey] ?? UUID().uuidString
                         identities[groupingKey] = albumID; groupingKeys[albumID] = groupingKey
                         if folderAssets[groupedFolder.path] == nil { folderAssets[groupedFolder.path] = Self.assets(groupedFolder) }
                         let assets = folderAssets[groupedFolder.path]!
@@ -79,7 +90,7 @@ public actor LibraryScanner {
                         state.processed += 1
                         if ["APE", "CUE"].contains(track.format) { state.errors.append("미지원 형식: \(relative)") }
                     } catch is CancellationError { throw CancellationError() }
-                    catch { state.errors.append("\(relative): \(error.localizedDescription)") }
+                    catch { coverage.protectedPaths.insert(relative); state.errors.append("\(relative): \(error.localizedDescription)") }
                 }
                 if state.discovered % 25 == 0 {
                     for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID, groupingKey: groupingKeys[album.id]) }; pending.removeAll()
@@ -87,8 +98,12 @@ public actor LibraryScanner {
                 }
             }
             for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID, groupingKey: groupingKeys[album.id]) }
-            // Any failed subtree keeps its previous availability. No deletion on a partial scan.
-            if walkErrors.isEmpty && state.errors.isEmpty { try await db.reconcile(rootID: root.id, scanID: scanID) }
+            try Task.checkCancellation()
+            // A disconnected/replaced volume cannot prove that any file disappeared.
+            let finalVolume = try rootURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString
+            guard fm.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue,
+                  volume == finalVolume else { throw AppError.message("스캔 중 라이브러리 연결이 변경되었습니다. 이전 색인은 유지합니다.") }
+            try await db.finishScan(root: root, scanID: scanID, coverage: coverage)
             state.errors += walkErrors; state.finished = true
         } catch is CancellationError {
             for (album, tracks) in pending.values { try await db.upsert(album: album, tracks: tracks, scanID: scanID, groupingKey: groupingKeys[album.id]) }

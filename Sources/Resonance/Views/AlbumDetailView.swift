@@ -13,7 +13,7 @@ struct AlbumDetailView: View {
         Group {
             if let album {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 26) {
+                    LazyVStack(alignment: .leading, spacing: 26) {
                         HStack(alignment: .top, spacing: 26) {
                             ArtworkView(path: album.artwork, size: 205).shadow(color: .black.opacity(0.12), radius: 12, y: 5)
                             VStack(alignment: .leading, spacing: 12) {
@@ -38,29 +38,32 @@ struct AlbumDetailView: View {
                                 Button("Finder에서 보기") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: album.folder)]) }
                             } label: { Image(systemName: "ellipsis.circle") }.menuStyle(.borderlessButton).frame(width: 22)
                             if !album.attachments.isEmpty {
-                                Menu("부클릿", systemImage: "doc.richtext") { ForEach(album.attachments, id: \.self) { path in Button(URL(fileURLWithPath: path).lastPathComponent) { NSWorkspace.shared.open(URL(fileURLWithPath: path)) } } }
+                                Menu("부클릿", systemImage: "doc.richtext") { ForEach(album.attachments, id: \.self) { path in Button(URL(fileURLWithPath: path).lastPathComponent) { model.openBooklet(album, path: path) } } }
                             }
                             Spacer()
                         }.buttonStyle(.borderless).font(.callout)
-                        StoryPanel(model: model, request: .album(album, tracks: tracks))
-                        VStack(spacing: 0) {
+                        MetadataStatusView(model: model, album: album) { matchVisible = true }.id("metadata")
+                        if !album.attachments.isEmpty { BookletLinks(model: model, album: album).id("booklet") }
+                        StoryPanel(model: model, request: .album(album, tracks: tracks)).id("story")
+                        LazyVStack(spacing: 0) {
                             ForEach(Array(Set(tracks.map(\.disc))).sorted(), id: \.self) { disc in
                                 if Set(tracks.map(\.disc)).count > 1 { Text("DISC \(disc)").font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 14) }
                                 ForEach(tracks.filter { $0.disc == disc }) { track in
-                                    TrackRow(model: model, track: track, play: { model.playAlbum(album, start: tracks.firstIndex(where: { $0.id == track.id }) ?? 0) })
+                                    TrackRow(model: model, track: track, play: { model.playAlbum(album, start: tracks.firstIndex(where: { $0.id == track.id }) ?? 0) }).id(track.id)
+                                        .background(model.highlightedTrack == track.id ? Color.accentColor.opacity(0.09) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                                     Divider().opacity(0.45)
                                 }
                             }
-                        }
+                        }.scrollTargetLayout()
                         if !album.barcode.isEmpty { Text("판 UPC  \(album.barcode)").font(.caption).foregroundStyle(.tertiary).textSelection(.enabled) }
-                    }.padding(28)
-                }
+                    }.padding(28).scrollTargetLayout()
+                }.scrollPosition(id: Binding(get: { model.detailStates["album:" + albumID]?.scroll }, set: { model.detailStates["album:" + albumID, default: DetailState()].scroll = $0 }))
                 .sheet(isPresented: $matchVisible, onDismiss: { Task { await load() } }) { MatchReviewView(model: model, album: album, local: tracks) }
                 .sheet(isPresented: $editVisible, onDismiss: { Task { await load(); await model.reload() } }) { AlbumEditView(model: model, album: album) }
             } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
-        }.task { await load() }
+        }.task(id: albumID + String(model.discovery.revision)) { await load() }
     }
-    private func load() async { do { let loadedTracks = try await model.db.tracks(albumID: albumID), loaded = try await model.db.album(albumID); tracks = loadedTracks; album = loaded } catch { model.error = error.localizedDescription } }
+    private func load() async { do { let loadedTracks = try await model.db.tracks(albumID: albumID), loaded = try await model.db.album(albumID); tracks = loadedTracks; if let loaded { album = await model.refreshBooklets(loaded) } else { album = nil } } catch { model.error = error.localizedDescription } }
 }
 
 struct TrackRow: View {
@@ -71,7 +74,7 @@ struct TrackRow: View {
         HStack(alignment: .center, spacing: 12) {
             Button(action: play) { if model.playback.current?.id == track.id { Image(systemName: "waveform").foregroundStyle(.tint) } else { Text(String(format: "%02d", track.number)).monospacedDigit().foregroundStyle(.secondary) } }.buttonStyle(.plain).frame(width: 30).help("이 트랙부터 재생")
             VStack(alignment: .leading, spacing: 5) {
-                Text(track.title).font(.system(size: 13, weight: model.playback.current?.id == track.id ? .semibold : .regular)).lineLimit(3)
+                Button { model.go(.track(track.id)) } label: { Text(track.title).font(.system(size: 13, weight: model.playback.current?.id == track.id ? .semibold : .regular)).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain).help("곡 상세 · 작품과 관련 음반")
                 let composers = track.credits.filter { $0.role == "composer" }
                 if composers.isEmpty { Text("작곡자 미확정").font(.caption2).foregroundStyle(.tertiary) }
                 else { CreditLinks(model: model, credits: composers) }
@@ -79,6 +82,8 @@ struct TrackRow: View {
             if !track.available || !track.supported { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(track.supported ? "연결되지 않은 음원" : "미지원 형식") }
             Text(clockText(track.duration)).font(.caption).monospacedDigit().foregroundStyle(.secondary).frame(width: 45, alignment: .trailing)
             Menu {
+                Button("곡 상세와 관련 음반") { model.go(.track(track.id)) }
+                Button("앨범에서 보기") { model.reveal(track) }
                 Button("재생", action: play)
                 Button("다음에 재생") { Task { await model.playback.append([track], next: true) } }
                 Button("큐에 추가") { Task { await model.playback.append([track]) } }

@@ -11,6 +11,7 @@ struct ContentView: View {
             Group {
                 switch model.destination {
                 case .library: LibraryView(model: model)
+                case .track(let id): TrackDetailView(model: model, trackID: id).id(id)
                 case .album(let id): AlbumDetailView(model: model, albumID: id).id(id)
                 case .artist(let id): EntityDetailView(model: model, entityID: id, kind: "artist").id(id)
                 case .work(let id): EntityDetailView(model: model, entityID: id, kind: "work").id(id)
@@ -43,6 +44,8 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { PlaybackBar(model: model) }
         .frame(minWidth: 1000, minHeight: 650)
         .onChange(of: model.query) { _, _ in model.scheduleSearch() }
+        .environment(\.openURL, OpenURLAction { model.openStoryURL($0) })
+        .sheet(item: $model.booklet) { BookletView(model: model, selection: $0) }
         .sheet(isPresented: $model.queueVisible) { QueueView(model: model) }
         .alert("알림", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button("확인") { model.error = nil } } message: { Text(model.error ?? "") }
     }

@@ -82,7 +82,8 @@ public struct Credit: Codable, Hashable, Identifiable, Sendable {
     public var name: String
     public var role: String
     public var source: String
-    public init(artistID: String, name: String, role: String, source: String = "local") { self.artistID = artistID; self.name = name; self.role = role; self.source = source }
+    public var attributes: [String]?
+    public init(artistID: String, name: String, role: String, source: String = "local", attributes: [String]? = nil) { self.artistID = artistID; self.name = name; self.role = role; self.source = source; self.attributes = attributes }
     public var roleLabel: String {
         ["composer": "작곡", "performer": "연주", "conductor": "지휘", "ensemble": "앙상블", "arranger": "편곡", "lyricist": "작사"][role] ?? role
     }
@@ -101,8 +102,9 @@ public struct Work: Codable, Identifiable, Hashable, Sendable {
     public var id: String
     public var title: String
     public var parentID: String?
+    public var parentTitle: String?
     public var source: String
-    public init(id: String, title: String, parentID: String? = nil, source: String = "local") { self.id = id; self.title = title; self.parentID = parentID; self.source = source }
+    public init(id: String, title: String, parentID: String? = nil, source: String = "local", parentTitle: String? = nil) { self.id = id; self.title = title; self.parentID = parentID; self.source = source; self.parentTitle = parentTitle }
 }
 
 public struct SearchHit: Identifiable, Sendable {

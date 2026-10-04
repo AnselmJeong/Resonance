@@ -124,6 +124,8 @@ public struct MatchedTrack: Codable, Sendable {
     public var recordingID: String
     public var credits: [Credit]
     public var works: [Work]
+    public var duration: Double? = nil
+    public var recordingDate: String? = nil
 }
 public struct ReleaseMatch: Codable, Sendable {
     public var candidate: ReleaseCandidate

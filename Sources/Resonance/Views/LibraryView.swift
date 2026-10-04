@@ -124,7 +124,7 @@ struct SearchResultsView: View {
     private func navigate(_ hit: SearchHit) {
         switch hit.kind {
         case "album": model.go(.album(hit.entityID))
-        case "track": if let albumID = hit.albumID { model.go(.album(albumID)) }
+        case "track": model.go(.track(hit.entityID))
         case "artist": model.go(.artist(hit.entityID))
         case "work": model.go(.work(hit.entityID))
         default: break

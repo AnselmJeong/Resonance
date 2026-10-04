@@ -3,7 +3,7 @@ import AppKit
 import Observation
 import ResonanceCore
 
-enum Destination: Hashable { case library, album(String), artist(String), work(String) }
+enum Destination: Hashable { case library, album(String), artist(String), work(String), track(String) }
 
 @MainActor @Observable
 final class AppModel {
@@ -14,6 +14,11 @@ final class AppModel {
     let tinyFish = TinyFishClient()
     let insights: InsightService
     let stories: StoryStore
+    let discovery: DiscoveryStore
+    let booklets = BookletReader()
+    var booklet: BookletSelection?
+    var detailStates: [String: DetailState] = [:]
+    var highlightedTrack: String?
     var roots: [LibraryRoot] = []
     var sections: [LibrarySection] = []
     var albums: [Album] = []
@@ -71,6 +76,7 @@ final class AppModel {
         db = try LibraryDatabase(path: AppPaths.support.appendingPathComponent("Library.sqlite").path)
         scanner = LibraryScanner(database: db, cache: AppPaths.cache)
         playback = PlaybackCoordinator(database: db); insights = InsightService(database: db)
+        discovery = DiscoveryStore(service: MetadataDiscovery(database: db, client: musicBrainz, artworkDirectory: AppPaths.cache))
         stories = StoryStore(db: db, pipeline: StoryPipeline(tinyFish: tinyFish, insights: insights))
     }
     func bootstrap() async {
@@ -131,7 +137,7 @@ final class AppModel {
                 } catch is CancellationError { break }
                 catch { self.error = error.localizedDescription }
             }
-            scanning = false; await reload()
+            scanning = false; discovery.changed(); await playback.refreshLibraryReferences(); await reload()
             AppLog.library.info("Scan completed; albumCount=\(self.counts.albums, privacy: .public); trackCount=\(self.counts.tracks, privacy: .public)")
             try? ArtworkCache.trim(directory: AppPaths.cache, megabytes: settings.cacheMegabytes)
         }

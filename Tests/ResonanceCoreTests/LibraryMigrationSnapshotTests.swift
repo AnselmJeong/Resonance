@@ -4,6 +4,53 @@ import GRDB
 @testable import ResonanceCore
 
 @Suite struct LibraryMigrationSnapshotTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["RESONANCE_RELOCATION_SNAPSHOT"] != nil))
+    func relocationOnLibraryCopy() async throws {
+        let sourcePath = try #require(ProcessInfo.processInfo.environment["RESONANCE_RELOCATION_SNAPSHOT"])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ResonanceRelocationSnapshot-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = Configuration(); config.readonly = true
+        let source = try DatabaseQueue(path: sourcePath, configuration: config)
+        let path = directory.appendingPathComponent("Library.sqlite").path, copy = try DatabaseQueue(path: path)
+        try source.backup(to: copy)
+        let db = try LibraryDatabase(path: path)
+        let root = try #require(try await db.roots().first { $0.path.hasSuffix("/Artist") })
+        let before = try await db.counts(), beforeAlbums = try await db.albums(rootID: root.id, limit: 100_000)
+        let old = beforeAlbums.filter { $0.folder.contains("/Alexander Tharaud/") }
+        #expect(old.count == 4)
+        let oldTracks = try await db.scanTracks(rootID: root.id).values.filter { $0.relativePath.hasPrefix("Alexander Tharaud/") }
+        #expect(oldTracks.count == 106)
+        let queue = try await db.preference("queue", as: QueueSnapshot.self)
+        let insightIDs = try await copy.read { try String.fetchAll($0, sql: "SELECT id FROM insight ORDER BY id") }
+        let scanner = LibraryScanner(database: db, cache: directory.appendingPathComponent("Artwork"))
+        let scan = try await scanner.scan(root: root) { _ in }
+        #expect(scan.finished); #expect(!scan.cancelled)
+        let after = try await db.counts()
+        #expect(after.albums == before.albums - 4); #expect(after.tracks == before.tracks - 106)
+        for album in old {
+            let current = try #require(try await db.album(album.id))
+            #expect(current.folder.contains("/Alexandre Tharaud/"))
+            #expect(current.trackCount == album.trackCount)
+            #expect(!album.favorite || current.favorite)
+        }
+        for oldTrack in oldTracks {
+            let current = try #require(try await db.rawTrack(oldTrack.id))
+            #expect(current.tags == oldTrack.tags); #expect(current.size == oldTrack.size)
+            #expect(current.relativePath == oldTrack.relativePath.replacingOccurrences(of: "Alexander Tharaud/", with: "Alexandre Tharaud/"))
+            #expect(current.available)
+        }
+        let saved = try await db.preference("queue", as: QueueSnapshot.self)
+        #expect(saved?.entries.map(\.id) == queue?.entries.map(\.id)); #expect(saved?.index == queue?.index); #expect(saved?.position == queue?.position)
+        #expect(try await copy.read { try String.fetchAll($0, sql: "SELECT id FROM insight ORDER BY id") } == insightIDs)
+        #expect(try await db.integrityCheck() == "ok")
+        #expect(try await copy.read { try Row.fetchAll($0, sql: "PRAGMA foreign_key_check").count } == 0)
+        let second = try await scanner.scan(root: root) { _ in }
+        #expect(second.finished); #expect(try await db.counts().tracks == after.tracks)
+        #expect(try await db.counts().albums == after.albums)
+        print("RELOCATION COPY: \(before.albums) -> \(after.albums) albums; \(before.tracks) -> \(after.tracks) tracks; \(scan.errors.count) unrelated errors; 106 original track IDs preserved; repeat scan stable")
+    }
+
     /// The provided database is read-only; migrations only run against a fresh backup copy.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["RESONANCE_LIBRARY_SNAPSHOT"] != nil))
     func migrationOnLibraryCopy() async throws {

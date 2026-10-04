@@ -22,8 +22,8 @@ struct MatchReviewView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if let confirmed {
-                        Label("사용자가 연결한 판: \(confirmed.candidate.title)", systemImage: "checkmark.seal").foregroundStyle(.tint)
-                        Button("외부 매칭 해제") { run { try await model.db.removeMatch(albumID: album.id); self.confirmed = nil; preview = nil } }
+                        Label("연결된 판: \(confirmed.candidate.title)", systemImage: "checkmark.seal").foregroundStyle(.tint)
+                        Button("외부 매칭 해제") { run { try await model.db.removeMatch(albumID: album.id); self.confirmed = nil; preview = nil; model.discovery.changed(album.id) } }
                     }
                     Text("후보 점수는 일치 근거의 합계이며 정확도 확률이 아닙니다. 다른 CD·디지털 판을 구분하고 트랙별 대응을 확인하세요.").font(.callout).foregroundStyle(.secondary).lineSpacing(3)
                     HStack { Button("MusicBrainz 후보 찾기") { search(force: false) }.disabled(busy || !model.settings.enabled); Button("다시 조회") { search(force: true) }.disabled(busy || !model.settings.enabled); if !model.settings.enabled { SettingsLink { Text("온라인 정보 활성화…") } } }
@@ -34,7 +34,7 @@ struct MatchReviewView: View {
                     Link("MusicBrainz 제공 · 데이터와 라이선스", destination: URL(string: "https://musicbrainz.org/doc/About/Data_License")!).font(.caption)
                 }.padding(24)
             }
-        }.frame(width: 780, height: 670).task { confirmed = try? await model.db.confirmedMatch(album.id) }.onDisappear { job?.cancel() }
+        }.frame(width: 780, height: 670).task { confirmed = try? await model.db.confirmedMatch(album.id); candidates = model.discovery.states[album.id]?.snapshot?.candidates ?? [] }.onDisappear { job?.cancel() }
     }
     private func candidateCard(_ candidate: ReleaseCandidate) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -55,7 +55,7 @@ struct MatchReviewView: View {
             ForEach(local) { track in correspondence(track, match: match) }
             Toggle("디스크·트랙 순서와 제목을 검토했으며 이 판으로 연결합니다", isOn: $orderReviewed)
             Button("이 판으로 연결") {
-                run { try await model.db.confirmMatch(albumID: album.id, match: match, approvedOrder: orderReviewed); confirmed = match; await model.reload() }
+                run { try await model.db.confirmMatch(albumID: album.id, match: match, approvedOrder: orderReviewed); confirmed = match; model.discovery.changed(album.id); await model.reload() }
             }.buttonStyle(.borderedProminent).disabled(busy || !orderReviewed || match.tracks.count != local.count)
         }
     }

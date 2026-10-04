@@ -219,6 +219,18 @@ final class PlaybackCoordinator {
         let snapshot = QueueSnapshot(entries: entries, index: index, position: position)
         Task { try? await db.setPreference("queue", value: snapshot) }
     }
+    /// Refresh paths/redirects after a scan without restarting the current audio stream.
+    func refreshLibraryReferences() async {
+        var redirects: [String: String] = [:]
+        for id in Set(entries.map(\.trackID)) { redirects[id] = try? await db.resolvedLibraryID(id) }
+        for i in entries.indices { entries[i].trackID = redirects[entries[i].trackID] ?? entries[i].trackID }
+        if let id = current?.id, let refreshed = try? await db.track(id), current?.id == id {
+            current = refreshed
+            let album = try? await db.album(refreshed.albumID)
+            if current?.id == refreshed.id { currentAlbum = album }
+        }
+        await prepareNext(); persist(); updateNowPlaying()
+    }
     private func fail(_ message: String) { player.pause(); stream?.pause(); wantsPlaying = false; state = .failed; error = message; AppLog.playback.error("Playback failed: \(message, privacy: .private)"); persist(); updateNowPlaying() }
     private func fileURL(_ track: Track) async throws -> URL {
         guard track.supported else { throw AppError.message("\(track.format)은 아직 재생을 지원하지 않습니다.") }

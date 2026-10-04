@@ -58,6 +58,11 @@ final class StoryStore {
         }
     }
     func cancel(_ entityID: String, settings: InfoSettings) { tasks[key(entityID, settings)]?.cancel() }
+    func cancelAndWait(_ entityID: String, settings: InfoSettings) async {
+        let task = tasks[key(entityID, settings)]
+        task?.cancel()
+        await task?.value
+    }
     /// Picks up a story saved from the manual source editor.
     func reload(_ entityID: String, settings: InfoSettings) async {
         let id = key(entityID, settings)

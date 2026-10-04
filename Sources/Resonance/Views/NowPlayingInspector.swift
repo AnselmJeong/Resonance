@@ -4,17 +4,20 @@ import ResonanceCore
 struct NowPlayingInspector: View {
     let model: AppModel
     @State private var works: [Work] = []
-    var track: Track? { model.playback.current }
+    @State private var resolvedTrack: Track?
+    @State private var resolvedAlbum: Album?
+    var track: Track? { resolvedTrack?.id == model.playback.current?.id ? resolvedTrack : model.playback.current }
+    var album: Album? { resolvedAlbum?.id == track?.albumID ? resolvedAlbum : model.playback.currentAlbum }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 HStack { Text("감상 노트").font(.headline); Spacer(); Image(systemName: "text.book.closed").foregroundStyle(.secondary) }
                 if let track {
-                    ArtworkView(path: model.playback.currentAlbum?.artwork, size: 230)
+                    ArtworkView(path: album?.artwork, size: 230)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("NOW PLAYING").font(.caption2.weight(.semibold)).tracking(1.5).foregroundStyle(.secondary)
-                        Text(track.title).font(.title3.weight(.semibold)).textSelection(.enabled)
-                        Text(model.playback.currentAlbum?.artist ?? "").font(.callout).foregroundStyle(.secondary)
+                        Button { model.go(.track(track.id)) } label: { Text(track.title).font(.title3.weight(.semibold)).frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain)
+                        if let album { Button(album.title) { model.reveal(track) }.buttonStyle(.borderless).font(.callout) }
                     }
                     Divider()
                     if !works.isEmpty {
@@ -29,6 +32,9 @@ struct NowPlayingInspector: View {
                         }
                         if !track.credits.contains(where: { $0.role == "composer" }) { Text("작곡자 정보가 없는 태그입니다. 크레디트 검토에서 출처를 확인할 수 있습니다.").font(.caption).foregroundStyle(.secondary) }
                     }
+                    Divider()
+                    RelatedAlbumsView(model: model, trackID: track.id, compact: true)
+                    if let album, !album.attachments.isEmpty { BookletLinks(model: model, album: album) }
                     Divider()
                     StoryPanel(model: model, request: .track(track, album: model.playback.currentAlbum), auto: false, compact: true)
                     if let album = model.playback.currentAlbum {
@@ -48,10 +54,15 @@ struct NowPlayingInspector: View {
                 }
             }.padding(22)
         }
-        .task(id: (track?.id ?? "") + model.settings.language) {
-            works = []; guard let id = track?.id else { return }
+        .task(id: (model.playback.current?.id ?? "") + model.settings.language + String(model.discovery.revision) + String(model.settings.enabled)) {
+            works = []; guard let id = model.playback.current?.id else { resolvedTrack = nil; resolvedAlbum = nil; return }
+            let foundTrack = try? await model.db.track(id)
+            var foundAlbum: Album?
+            if let foundTrack, let loaded = try? await model.db.album(foundTrack.albumID) { foundAlbum = await model.refreshBooklets(loaded) }
             let related = (try? await model.db.works(trackID: id)) ?? []
-            guard !Task.isCancelled, track?.id == id else { return }; works = related
+            guard !Task.isCancelled, model.playback.current?.id == id else { return }
+            resolvedTrack = foundTrack; resolvedAlbum = foundAlbum; works = related
+            if let album = resolvedAlbum { await model.discovery.prepare(album, enabled: model.settings.enabled) }
         }
     }
 }

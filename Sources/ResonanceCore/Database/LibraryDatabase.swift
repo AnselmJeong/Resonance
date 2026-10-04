@@ -3,7 +3,7 @@ import GRDB
 
 public actor LibraryDatabase {
     public nonisolated let path: String
-    private let pool: DatabasePool
+    let pool: DatabasePool
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -50,6 +50,10 @@ public actor LibraryDatabase {
             }
         }
         migrator.registerMigration("v3-album-grouping") { db in try AlbumGroupingMigration.migrate(db) }
+        migrator.registerMigration("v4-discovery") { db in try DiscoveryMigration.migrate(db) }
+        migrator.registerMigration("v5-library-relocation") { db in
+            try db.execute(sql: "CREATE TABLE libraryRedirect(originalID TEXT PRIMARY KEY, targetID TEXT NOT NULL, rootID TEXT NOT NULL REFERENCES root(id))")
+        }
         if hadDatabase, try !pool.read({ try migrator.hasCompletedMigrations($0) }) {
             let backupPath = path + ".before-migration-\(Int(Date().timeIntervalSince1970)).sqlite"
             try pool.backup(to: DatabaseQueue(path: backupPath))
@@ -57,9 +61,9 @@ public actor LibraryDatabase {
         try migrator.migrate(pool)
     }
 
-    private func json<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
-    private func decode<T: Decodable>(_ type: T.Type, _ string: String) throws -> T { try decoder.decode(type, from: Data(string.utf8)) }
-    private func list<T: Decodable>(_ type: T.Type, sql: String, args: StatementArguments = []) throws -> [T] {
+    func json<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
+    func decode<T: Decodable>(_ type: T.Type, _ string: String) throws -> T { try decoder.decode(type, from: Data(string.utf8)) }
+    func list<T: Decodable>(_ type: T.Type, sql: String, args: StatementArguments = []) throws -> [T] {
         try pool.read { db in try String.fetchAll(db, sql: sql, arguments: args).map { try decode(type, $0) } }
     }
 
@@ -70,6 +74,7 @@ public actor LibraryDatabase {
     /// Removes only the app's index. This method never accesses the music files.
     public func removeRoot(_ rootID: String) throws -> Set<String> {
         try pool.write { db in
+            try db.execute(sql: "DELETE FROM identityLink WHERE albumID IN (SELECT id FROM album WHERE rootID=?)", arguments: [rootID])
             let removedTracks = Set(try String.fetchAll(db, sql: "SELECT id FROM track WHERE rootID=?", arguments: [rootID]))
             // A user may have moved another root's album into this root's collection.
             let movedAlbums = try String.fetchAll(db, sql: "SELECT data FROM album WHERE rootID<>? AND sectionID IN (SELECT id FROM section WHERE rootID=?)", arguments: [rootID, rootID])
@@ -109,6 +114,7 @@ public actor LibraryDatabase {
             try db.execute(sql: "DELETE FROM section WHERE rootID=?", arguments: [rootID])
             try db.execute(sql: "DELETE FROM scanRun WHERE rootID=?", arguments: [rootID])
             try db.execute(sql: "DELETE FROM albumMergeArchive WHERE rootID=?", arguments: [rootID])
+            try db.execute(sql: "DELETE FROM libraryRedirect WHERE rootID=?", arguments: [rootID])
             try db.execute(sql: "DELETE FROM root WHERE id=?", arguments: [rootID])
             // A shared work's search link may have pointed at the removed album.
             try db.execute(sql: """
@@ -137,31 +143,33 @@ public actor LibraryDatabase {
     public func counts() throws -> (albums: Int, tracks: Int) {
         try pool.read { db in (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM album") ?? 0, try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM track") ?? 0) }
     }
-    public func album(_ id: String) throws -> Album? { try list(Album.self, sql: "SELECT data FROM album WHERE id=?", args: [id]).first }
+    public func album(_ id: String) throws -> Album? { try list(Album.self, sql: "SELECT data FROM album WHERE id=?", args: [resolvedLibraryID(id)]).first }
     public func albumIdentities(rootID: String) throws -> [String: String] {
         try pool.read { db in
             Dictionary(uniqueKeysWithValues: try Row.fetchAll(db, sql: "SELECT groupingKey,id FROM album WHERE rootID=? AND groupingKey IS NOT NULL", arguments: [rootID]).map { ($0["groupingKey"] as String, $0["id"] as String) })
         }
     }
-    public func track(_ id: String) throws -> Track? { try list(Track.self, sql: "SELECT data FROM track WHERE id=?", args: [id]).first }
-    public func tracks(albumID: String) throws -> [Track] { try list(Track.self, sql: "SELECT data FROM track WHERE albumID=? ORDER BY disc,number,path", args: [albumID]) }
+    public func rawTrack(_ id: String) throws -> Track? { try list(Track.self, sql: "SELECT data FROM track WHERE id=?", args: [resolvedLibraryID(id)]).first }
+    public func track(_ id: String) throws -> Track? { try displayTracks(list(Track.self, sql: "SELECT data FROM track WHERE id=?", args: [resolvedLibraryID(id)])).first }
+    public func tracks(albumID: String) throws -> [Track] { try displayTracks(list(Track.self, sql: "SELECT data FROM track WHERE albumID=? ORDER BY disc,number,path", args: [resolvedLibraryID(albumID)])) }
     public func artist(_ id: String) throws -> Artist? { try list(Artist.self, sql: "SELECT data FROM artist WHERE id=?", args: [id]).first }
     public func work(_ id: String) throws -> Work? { try list(Work.self, sql: "SELECT data FROM work WHERE id=?", args: [id]).first }
     public func artists(role: String? = nil, limit: Int = 100) throws -> [Artist] {
-        try list(Artist.self, sql: "SELECT data FROM artist WHERE EXISTS (SELECT 1 FROM credit WHERE artistID=artist.id" + (role == nil ? "" : " AND role=?") + ") ORDER BY name LIMIT ?", args: role.map { [$0, limit] } ?? [limit])
-    }
-    public func artistTracks(_ id: String, sectionID: String? = nil) throws -> [Track] {
-        try list(Track.self, sql: "SELECT DISTINCT t.data FROM track t JOIN credit c ON c.trackID=t.id JOIN album a ON a.id=t.albumID WHERE c.artistID=?" + (sectionID == nil ? "" : " AND a.sectionID=?") + " ORDER BY a.title,t.disc,t.number LIMIT 500", args: sectionID.map { [id, $0] } ?? [id])
-    }
-    public func workTracks(_ id: String) throws -> [Track] {
-        try list(Track.self, sql: "SELECT t.data FROM track t JOIN recording r ON r.trackID=t.id JOIN recordingWork rw ON rw.recordingID=r.id WHERE rw.workID=? ORDER BY t.albumID,t.disc,t.number LIMIT 500", args: [id])
+        let values = try list(Artist.self, sql: "SELECT data FROM artist WHERE EXISTS (SELECT 1 FROM credit WHERE artistID=artist.id" + (role == nil ? "" : " AND role=?") + ") ORDER BY name", args: role.map { [$0] } ?? [])
+        var seen = Set<String>(), result: [Artist] = []
+        for value in values {
+            let id = try canonicalID(value.id, kind: "artist")
+            if seen.insert(id).inserted { result.append(try artist(id) ?? value) }
+            if result.count >= limit { break }
+        }
+        return result
     }
 
     public func upsert(album incoming: Album, tracks: [Track], scanID: String, groupingKey: String? = nil) throws {
         try pool.write { db in
             var album = incoming
             if let old = try String.fetchOne(db, sql: "SELECT data FROM album WHERE id=?", arguments: [album.id]) { album.favorite = try decode(Album.self, old).favorite }
-            let overrides = try Row.fetchAll(db, sql: "SELECT field,value FROM assertion WHERE entityID=? AND source='user'", arguments: [album.id])
+            let overrides = try Row.fetchAll(db, sql: "SELECT field,value FROM assertion WHERE entityID=? AND (source='user' OR (source='musicbrainz' AND field='artwork')) ORDER BY CASE source WHEN 'user' THEN 1 ELSE 0 END", arguments: [album.id])
             for row in overrides {
                 let field: String = row["field"], value: String = row["value"]
                 if field == "title" { album.title = value }; if field == "artist" { album.artist = value }; if field == "artwork" { album.artwork = value }; if field == "sectionID" { album.sectionID = value }
@@ -171,16 +179,17 @@ public actor LibraryDatabase {
             for var track in tracks {
                 // Confirmed external credits are assertions, independent of scanner input.
                 let remoteCredits = try Row.fetchAll(db, sql: "SELECT a.data,c.role,c.source FROM artist a JOIN credit c ON c.artistID=a.id WHERE c.trackID=? AND c.source != 'local'", arguments: [track.id])
+                let oldCredits = try String.fetchOne(db, sql: "SELECT data FROM track WHERE id=?", arguments: [track.id]).map { try decode(Track.self, $0).credits } ?? []
                 for row in remoteCredits {
                     let artist = try decode(Artist.self, row["data"])
-                    track.credits.append(Credit(artistID: artist.id, name: artist.name, role: row["role"], source: row["source"]))
+                    track.credits.append(oldCredits.first { $0.artistID == artist.id && $0.role == (row["role"] as String) && $0.source == (row["source"] as String) } ?? Credit(artistID: artist.id, name: artist.name, role: row["role"], source: row["source"]))
                 }
                 track.credits = Array(Set(track.credits)).sorted { ($0.role, $0.name) < ($1.role, $1.name) }
-                try db.execute(sql: "INSERT INTO track(id,rootID,albumID,path,disc,number,format,available,scanID,data) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET albumID=excluded.albumID,disc=excluded.disc,number=excluded.number,format=excluded.format,available=excluded.available,scanID=excluded.scanID,data=excluded.data", arguments: [track.id, track.rootID, track.albumID, track.relativePath, track.disc, track.number, track.format, track.available, scanID, try json(track)])
+                try db.execute(sql: "INSERT INTO track(id,rootID,albumID,path,disc,number,format,available,scanID,data) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,albumID=excluded.albumID,disc=excluded.disc,number=excluded.number,format=excluded.format,available=excluded.available,scanID=excluded.scanID,data=excluded.data", arguments: [track.id, track.rootID, track.albumID, track.relativePath, track.disc, track.number, track.format, track.available, scanID, try json(track)])
                 try db.execute(sql: "INSERT OR IGNORE INTO recording(id,trackID) VALUES(?,?)", arguments: [track.recordingID, track.id])
                 try db.execute(sql: "DELETE FROM credit WHERE trackID=? AND source='local'", arguments: [track.id])
                 for credit in track.credits {
-                    var artist = Artist(id: credit.artistID, name: credit.name, role: credit.role)
+                    var artist = Artist(id: credit.artistID, name: credit.name, role: credit.role, externalID: credit.artistID.hasPrefix("mb:") ? String(credit.artistID.dropFirst(3)) : nil)
                     try db.execute(sql: "INSERT OR IGNORE INTO artist(id,name,role,data) VALUES(?,?,?,?)", arguments: [artist.id, artist.name, artist.role, try json(artist)])
                     if let saved = try String.fetchOne(db, sql: "SELECT data FROM artist WHERE id=?", arguments: [artist.id]) { artist = try decode(Artist.self, saved) }
                     try db.execute(sql: "INSERT OR IGNORE INTO credit(trackID,artistID,role,source) VALUES(?,?,?,?)", arguments: [track.id, credit.artistID, credit.role, credit.source])
@@ -194,6 +203,8 @@ public actor LibraryDatabase {
                     try Self.index(db, id: work.id, kind: "work", title: title, subtitle: album.artist, albumID: album.id, sectionID: album.sectionID)
                 }
             }
+            try DiscoveryMigration.tagLinks(db, albumID: album.id)
+            if try String.fetchOne(db, sql: "SELECT albumID FROM externalMatch WHERE albumID=?", arguments: [album.id]) != nil { try DiscoveryMigration.rebuild(db, albumID: album.id) }
             let stored = try String.fetchAll(db, sql: "SELECT data FROM track WHERE albumID=?", arguments: [album.id]).map { try decode(Track.self, $0) }
             album.trackCount = stored.count; album.duration = stored.reduce(0) { $0 + $1.duration }
             if !overrides.contains(where: { ($0["field"] as String) == "artist" }) { album.artist = AlbumGrouping.artist(tracks: stored, fallback: album.artist) }
@@ -255,7 +266,7 @@ public actor LibraryDatabase {
         }
     }
     public func markSeen(trackID: String, scanID: String) throws {
-        guard var track = try track(trackID) else { return }; track.available = true
+        guard var track = try rawTrack(trackID) else { return }; track.available = true
         try pool.write { db in try db.execute(sql: "UPDATE track SET scanID=?,available=1,data=? WHERE id=?", arguments: [scanID, try json(track), trackID]) }
     }
     public func scanHistory() throws -> [ScanProgress] { try list(ScanProgress.self, sql: "SELECT data FROM scanRun ORDER BY date DESC LIMIT 20") }
@@ -263,10 +274,12 @@ public actor LibraryDatabase {
         try pool.write { db in try db.execute(sql: "INSERT OR REPLACE INTO scanRun(id,rootID,date,data) VALUES(?,?,?,?)", arguments: [scanID, rootID, Date().timeIntervalSince1970, try json(progress)]) }
     }
     public func setFavorite(_ id: String, value: Bool) throws {
+        let id = try resolvedLibraryID(id)
         guard var album = try album(id) else { return }; album.favorite = value
         try pool.write { db in try db.execute(sql: "UPDATE album SET favorite=?,data=? WHERE id=?", arguments: [value, try json(album), id]) }
     }
     public func editAlbum(_ id: String, title: String, artist: String, sectionID: String, artwork: String? = nil) throws {
+        let id = try resolvedLibraryID(id)
         guard var album = try album(id) else { return }
         album.title = title; album.artist = artist; album.sectionID = sectionID
         if let artwork { album.artwork = artwork }
@@ -289,27 +302,36 @@ public actor LibraryDatabase {
         try pool.read { db in try String.fetchOne(db, sql: "SELECT data FROM preference WHERE key=?", arguments: [key]).map { try decode(type, $0) } }
     }
     public func setPreference<T: Encodable>(_ key: String, value: T) throws {
-        try pool.write { db in try db.execute(sql: "INSERT OR REPLACE INTO preference(key,data) VALUES(?,?)", arguments: [key, try json(value)]) }
+        let data: String
+        if key == "queue", var queue = value as? QueueSnapshot {
+            for i in queue.entries.indices { queue.entries[i].trackID = try resolvedLibraryID(queue.entries[i].trackID) }
+            data = try json(queue)
+        } else { data = try json(value) }
+        try pool.write { db in try db.execute(sql: "INSERT OR REPLACE INTO preference(key,data) VALUES(?,?)", arguments: [key, data]) }
     }
     public func backup(to path: String) throws { try pool.backup(to: DatabaseQueue(path: path)) }
     public func works(trackID: String) throws -> [Work] {
-        try list(Work.self, sql: "SELECT w.data FROM work w JOIN recordingWork rw ON rw.workID=w.id JOIN recording r ON r.id=rw.recordingID WHERE r.trackID=?", args: [trackID])
+        try displayWorks(list(Work.self, sql: "SELECT w.data FROM work w JOIN recordingWork rw ON rw.workID=w.id JOIN recording r ON r.id=rw.recordingID WHERE r.trackID=?", args: [resolvedLibraryID(trackID)]))
     }
-    public func integrityCheck() throws -> String { try pool.read { try String.fetchOne($0, sql: "PRAGMA integrity_check") ?? "unknown" } }
+    // Check on the writer: pooled readers can retain stale FTS5 segment state after bulk deletion.
+    public func integrityCheck() throws -> String { try pool.write { try String.fetchOne($0, sql: "PRAGMA integrity_check") ?? "unknown" } }
 
     public func saveDocument<T: Encodable>(_ table: String, id: String, value: T) throws {
         guard ["evidence", "externalMatch"].contains(table) else { throw AppError.message("허용하지 않는 저장 대상") }
         if table == "evidence" { try pool.write { try $0.execute(sql: "INSERT OR REPLACE INTO evidence(id,data) VALUES(?,?)", arguments: [id, try json(value)]) } }
     }
     public func saveInsight(_ value: Insight) throws {
+        var value = value; value.entityID = try resolvedLibraryID(value.entityID)
         try pool.write { db in try db.execute(sql: "INSERT OR REPLACE INTO insight(id,entityID,language,created,data) VALUES(?,?,?,?,?)", arguments: [value.id, value.entityID, value.language, value.created.timeIntervalSince1970, try json(value)]) }
     }
-    public func insight(entityID: String, language: String) throws -> Insight? { try list(Insight.self, sql: "SELECT data FROM insight WHERE entityID=? AND language=? ORDER BY created DESC LIMIT 1", args: [entityID, language]).first }
+    public func insight(entityID: String, language: String) throws -> Insight? { try list(Insight.self, sql: "SELECT data FROM insight WHERE entityID=? AND language=? ORDER BY created DESC LIMIT 1", args: [resolvedLibraryID(entityID), language]).first }
 
-    public func confirmedMatch(_ albumID: String) throws -> ReleaseMatch? { try list(ReleaseMatch.self, sql: "SELECT data FROM externalMatch WHERE albumID=?", args: [albumID]).first }
+    public func confirmedMatch(_ albumID: String) throws -> ReleaseMatch? { try list(ReleaseMatch.self, sql: "SELECT data FROM externalMatch WHERE albumID=?", args: [resolvedLibraryID(albumID)]).first }
     public func confirmMatch(albumID: String, match: ReleaseMatch, approvedOrder: Bool = false) throws {
-        let local = try tracks(albumID: albumID)
-        guard local.count == match.tracks.count, Set(local.map { "\($0.disc):\($0.number)" }) == Set(match.tracks.map { "\($0.disc):\($0.number)" }) else { throw AppError.message("디스크와 트랙 구조가 다릅니다. 이 판을 연결하지 않았습니다.") }
+        let albumID = try resolvedLibraryID(albumID)
+        let local = try list(Track.self, sql: "SELECT data FROM track WHERE albumID=? ORDER BY disc,number,path", args: [albumID])
+        let positions = Set(local.map { "\($0.disc):\($0.number)" }), remotePositions = Set(match.tracks.map { "\($0.disc):\($0.number)" })
+        guard !local.isEmpty, local.count == match.tracks.count, positions.count == local.count, remotePositions.count == match.tracks.count, positions == remotePositions else { throw AppError.message("디스크와 트랙 구조가 다릅니다. 이 판을 연결하지 않았습니다.") }
         for track in local {
             let remote = match.tracks.first { $0.disc == track.disc && $0.number == track.number }!
             guard approvedOrder || TextKey.normalize(track.title) == TextKey.normalize(remote.title) else { throw AppError.message("제목이 다른 트랙이 있습니다. 트랙별 대응을 검토하세요.") }
@@ -317,6 +339,7 @@ public actor LibraryDatabase {
         try pool.write { db in
             try db.execute(sql: "DELETE FROM credit WHERE source='musicbrainz' AND trackID IN (SELECT id FROM track WHERE albumID=?)", arguments: [albumID])
             try db.execute(sql: "DELETE FROM recordingWork WHERE source='musicbrainz' AND recordingID IN (SELECT r.id FROM recording r JOIN track t ON t.id=r.trackID WHERE t.albumID=?)", arguments: [albumID])
+            try db.execute(sql: "DELETE FROM preference WHERE key=?", arguments: ["metadata-skip:" + albumID])
             try db.execute(sql: "INSERT OR REPLACE INTO externalMatch(albumID,releaseID,data,confirmedAt) VALUES(?,?,?,?)", arguments: [albumID, match.candidate.id, try json(match), Date().timeIntervalSince1970])
             for var track in local {
                 let remote = match.tracks.first { $0.disc == track.disc && $0.number == track.number }!
@@ -324,12 +347,16 @@ public actor LibraryDatabase {
                 try db.execute(sql: "UPDATE track SET data=? WHERE id=?", arguments: [try json(track), track.id])
                 try db.execute(sql: "UPDATE recording SET mbid=? WHERE trackID=?", arguments: [remote.recordingID, track.id])
                 for credit in remote.credits {
-                    let artist = Artist(id: credit.artistID, name: credit.name, role: credit.role, externalID: String(credit.artistID.dropFirst(3)))
+                    let artist = Artist(id: credit.artistID, name: credit.name, role: credit.role, externalID: credit.artistID.hasPrefix("mb:") ? String(credit.artistID.dropFirst(3)) : nil)
                     try db.execute(sql: "INSERT OR IGNORE INTO artist(id,name,role,data) VALUES(?,?,?,?)", arguments: [artist.id, artist.name, artist.role, try json(artist)])
                     try db.execute(sql: "INSERT OR IGNORE INTO credit(trackID,artistID,role,source) VALUES(?,?,?,'musicbrainz')", arguments: [track.id, artist.id, credit.role])
                     try Self.index(db, id: artist.id, kind: "artist", title: artist.name, subtitle: credit.roleLabel, role: credit.role)
                 }
                 for work in remote.works {
+                    if let parentID = work.parentID, let title = work.parentTitle {
+                        let parent = Work(id: parentID, title: title, source: "musicbrainz")
+                        try db.execute(sql: "INSERT OR IGNORE INTO work(id,title,data) VALUES(?,?,?)", arguments: [parentID, title, try json(parent)])
+                    }
                     try db.execute(sql: "INSERT OR REPLACE INTO work(id,title,data) VALUES(?,?,?)", arguments: [work.id, work.title, try json(work)])
                     try db.execute(sql: "INSERT OR IGNORE INTO recordingWork(recordingID,workID,source) VALUES(?,?,'musicbrainz')", arguments: [track.recordingID, work.id])
                     try Self.index(db, id: work.id, kind: "work", title: work.title, subtitle: "MusicBrainz · 작품", albumID: albumID)
@@ -338,12 +365,16 @@ public actor LibraryDatabase {
                     try Self.index(db, id: track.id, kind: "track", title: track.title, subtitle: ([album.title, album.artist, album.label] + track.credits.map(\.name)).joined(separator: " · "), albumID: albumID, sectionID: album.sectionID, format: track.format)
                 }
             }
+            try DiscoveryMigration.rebuild(db, albumID: albumID)
         }
     }
     public func removeMatch(albumID: String) throws {
-        let local = try tracks(albumID: albumID)
+        let albumID = try resolvedLibraryID(albumID)
+        let local = try list(Track.self, sql: "SELECT data FROM track WHERE albumID=? ORDER BY disc,number,path", args: [albumID])
         guard let album = try album(albumID) else { return }
         try pool.write { db in
+            try db.execute(sql: "DELETE FROM identityLink WHERE albumID=? AND source='musicbrainz'", arguments: [albumID])
+            try db.execute(sql: "INSERT OR REPLACE INTO preference(key,data) VALUES(?,'true')", arguments: ["metadata-skip:" + albumID])
             try db.execute(sql: "DELETE FROM externalMatch WHERE albumID=?", arguments: [albumID])
             for var track in local {
                 track.credits.removeAll { $0.source == "musicbrainz" }

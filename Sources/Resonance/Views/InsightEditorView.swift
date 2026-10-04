@@ -25,7 +25,7 @@ struct InsightEditorView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if let insight { StoryContent(insight: insight, expanded: .constant(true)); Divider() }
+                    if let insight { StoryContent(model: model, insight: insight, expanded: .constant(true)); Divider() }
                     if !model.settings.enabled {
                         Label("설정에서 온라인 음악 정보를 활성화하세요.", systemImage: "network.slash").foregroundStyle(.secondary)
                         SettingsLink { Text("설정 열기") }

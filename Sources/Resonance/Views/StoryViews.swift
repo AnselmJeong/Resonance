@@ -28,7 +28,7 @@ struct StoryPanel: View {
             }
             if case .working(let step) = state.phase { StoryProgress(step: step, compact: compact) }
             if let insight = state.insight {
-                StoryContent(insight: insight, expanded: $expanded, compact: compact, open: compact ? { reading = true } : nil).opacity(isWorking ? 0.45 : 1)
+                StoryContent(model: model, insight: insight, expanded: $expanded, compact: compact, open: compact ? { reading = true } : nil).opacity(isWorking ? 0.45 : 1)
             } else {
                 switch state.phase {
                 case .failed(let message):
@@ -61,7 +61,7 @@ struct StoryPanel: View {
         .sheet(isPresented: $editing, onDismiss: { Task { await model.stories.reload(request.entityID, settings: model.settings) } }) {
             InsightEditorView(model: model, request: request)
         }
-        .sheet(isPresented: $reading) { if let insight = state.insight { StoryReader(label: label, title: request.title, insight: insight) } }
+        .sheet(isPresented: $reading) { if let insight = state.insight { StoryReader(model: model, label: label, title: request.title, insight: insight) } }
     }
     private var isWorking: Bool { if case .working = state.phase { return true }; return false }
     /// Quiet paper-like surface: a faint top light, hairline edge and soft lift.
@@ -103,10 +103,12 @@ struct StoryProgress: View {
 
 /// The whole story at reading width, opened from the narrow inspector — like Roon keeping long text in the main view, not the side pane.
 struct StoryReader: View {
+    let model: AppModel
     let label: String
     let title: String
     let insight: Insight
     @Environment(\.dismiss) private var dismiss
+    @State private var booklet: BookletSelection?
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 16) {
@@ -119,15 +121,31 @@ struct StoryReader: View {
             }.padding(.horizontal, 32).padding(.vertical, 18)
             Divider()
             ScrollView {
-                StoryContent(insight: insight, expanded: .constant(true), collapsible: false)
+                StoryContent(model: model, insight: insight, expanded: .constant(true), collapsible: false)
                     .padding(.horizontal, 44).padding(.vertical, 34).frame(maxWidth: 760).frame(maxWidth: .infinity)
             }
         }.frame(width: 740, height: 700)
+            .sheet(item: $booklet) { BookletView(model: model, selection: $0) }
+            .environment(\.openURL, OpenURLAction { url in
+                if let ref = BookletSource.reference(url) {
+                    Task {
+                        if let album = try? await model.db.album(ref.albumID), let path = album.attachments.first(where: { TextKey.hash($0) == ref.fileID }),
+                           (try? BookletSource.validatedURL(path: path, album: album, roots: model.roots)) != nil {
+                            booklet = BookletSelection(album: album, path: path, page: ref.page)
+                        }
+                    }
+                    return .handled
+                }
+                if DiscoveryLink.entity(url) != nil { dismiss() }
+                return model.openStoryURL(url)
+            })
     }
 }
 
 /// Reading layout: serif lead, topic sections with citation marks, a quiet uncertainty note and numbered sources.
 struct StoryContent: View {
+    let model: AppModel
+    @State private var entities: [StoryEntity] = []
     let insight: Insight
     @Binding var expanded: Bool
     var compact = false
@@ -160,6 +178,9 @@ struct StoryContent: View {
             }
             footer(sections)
         }
+        .task(id: insight.id + String(model.discovery.revision)) {
+            entities = (try? await model.db.storyEntities(in: insight.payload.sections.map(\.text).joined(separator: " "), entityID: insight.entityID, kind: insight.kind)) ?? []
+        }
     }
     private var uncertaintyNote: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -184,7 +205,7 @@ struct StoryContent: View {
                         .frame(width: 18, height: 18).background(Circle().fill(.tint.opacity(0.14)))
                     let title = source.title.trimmingCharacters(in: .whitespacesAndNewlines)
                     VStack(alignment: .leading, spacing: 2) {
-                        if let url = SafeLink.url(source.url) { Link(title, destination: url).font(compact ? .caption : .callout).lineLimit(2) } else { Text(title).font(compact ? .caption : .callout) }
+                        if let url = sourceURL(source.url) { Link(title, destination: url).font(compact ? .caption : .callout).lineLimit(2) } else { Text(title).font(compact ? .caption : .callout) }
                         Text("\(host(source.url)) · \(source.fetched.formatted(date: .abbreviated, time: .omitted)) 조회").font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
@@ -209,9 +230,17 @@ struct StoryContent: View {
             }
         }
     }
-    private func host(_ url: String) -> String { URL(string: url)?.host?.replacingOccurrences(of: "www.", with: "") ?? "" }
+    private func sourceURL(_ value: String) -> URL? {
+        if let url = URL(string: value), BookletSource.reference(url) != nil { return url }
+        return SafeLink.url(value)
+    }
+    private func host(_ url: String) -> String { url.hasPrefix("resonance-booklet:") ? "로컬 부클릿" : (URL(string: url)?.host?.replacingOccurrences(of: "www.", with: "") ?? "") }
     private func cited(_ section: InsightSection) -> Text {
         let marks = section.source_ids.compactMap { numbers[$0] }.sorted().map(String.init).joined(separator: ",")
-        return marks.isEmpty ? Text(section.text) : Text(section.text) + Text(" \(marks)").font(.system(size: compact ? 8 : 9, weight: .semibold)).baselineOffset(compact ? 5 : 7).foregroundColor(.accentColor)
+        var linked = AttributedString()
+        for span in StoryLinker.spans(section.text, entities: entities) {
+            var part = AttributedString(span.text); part.link = span.url; linked.append(part)
+        }
+        return marks.isEmpty ? Text(linked) : Text(linked) + Text(" \(marks)").font(.system(size: compact ? 8 : 9, weight: .semibold)).baselineOffset(compact ? 5 : 7).foregroundColor(.accentColor)
     }
 }
