@@ -64,8 +64,13 @@ struct EntityDetailView: View {
                 if loaded && visibleAlbums.isEmpty && children.isEmpty {
                     ContentUnavailableView("조건에 맞는 연주가 없습니다", systemImage: "music.note", description: Text("필터를 해제하거나 다른 앨범의 동일 인물·작품을 연결해 보세요."))
                 }
-                ForEach(visibleAlbums) { album in
-                    performance(album).id(album.id)
+                if kind == "artist" {
+                    // A musician's albums are a shelf of covers; the tracks live on each album page.
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
+                        ForEach(visibleAlbums) { album in performance(album).id(album.id) }
+                    }.scrollTargetLayout().id("albums")
+                } else {
+                    ForEach(visibleAlbums) { album in performance(album).id(album.id) }
                 }
                 if !namesakes.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
@@ -103,7 +108,7 @@ struct EntityDetailView: View {
                 Text(kind == "artist" ? "음악가 · 참여 음반" : "작품 · 연주 비교").font(.caption).foregroundStyle(.secondary)
                 Text(title).font(.largeTitle.weight(.semibold)).textSelection(.enabled)
                 Text("내 라이브러리의 \(Set(tracks.map(\.albumID)).count) 앨범 · \(tracks.count) 트랙").foregroundStyle(.secondary)
-                if !subjectID.hasPrefix("mb:") { Text("로컬 태그의 대상입니다. 같은 이름의 다른 항목은 확인 후 연결할 수 있습니다.").font(.caption).foregroundStyle(.secondary) }
+                if !subjectID.hasPrefix("mb:") { Text(kind == "artist" ? "로컬 태그의 음악가입니다. 이름이 같은 음악가는 자동으로 묶입니다." : "로컬 태그의 대상입니다. 같은 이름의 다른 항목은 확인 후 연결할 수 있습니다.").font(.caption).foregroundStyle(.secondary) }
                 Button("동일 \(kind == "artist" ? "음악가" : "작품") 연결 관리…") { linking = true }.buttonStyle(.borderless)
             }.fixedSize(horizontal: false, vertical: true)
         }
@@ -132,10 +137,10 @@ struct EntityDetailView: View {
         let dates = Array(Set(performance.compactMap { recordingDates[$0.id] })).sorted()
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 16) {
-                Button { model.go(.album(album.id)) } label: { ArtworkView(path: album.artwork, size: 78) }.buttonStyle(.plain)
+                Button { model.go(.album(album.id)) } label: { ArtworkView(path: album.artwork, size: kind == "artist" ? 96 : 78) }.buttonStyle(.plain)
                 VStack(alignment: .leading, spacing: 6) {
-                    Button(album.title) { model.go(.album(album.id)) }.buttonStyle(.plain).font(.headline)
-                    Text(performers.isEmpty ? album.artist : performers.joined(separator: " · ")).font(.callout).foregroundStyle(.secondary)
+                    Button { model.go(.album(album.id)) } label: { Text(album.title).multilineTextAlignment(.leading).lineLimit(kind == "artist" ? 2 : nil) }.buttonStyle(.plain).font(.headline).help("앨범 페이지 열기")
+                    Text(performers.isEmpty ? album.artist : performers.joined(separator: " · ")).font(.callout).foregroundStyle(.secondary).lineLimit(kind == "artist" ? 1 : nil)
                     Text([dates.isEmpty ? (album.year.isEmpty ? "녹음일 미상" : "발매 " + album.year) : "녹음 " + dates.joined(separator: ", "), "\(performance.count)곡", clockText(performance.reduce(0) { $0 + $1.duration })].joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button { Task { await model.playback.play(performance) } } label: { Label(kind == "work" ? "이 연주 듣기" : "참여곡 재생", systemImage: "play.fill") }.buttonStyle(.borderedProminent)
@@ -144,8 +149,9 @@ struct EntityDetailView: View {
                 }
                 Spacer()
             }
-            ForEach(performance) { track in TrackRow(model: model, track: track, play: { Task { await model.playback.play(performance, start: performance.firstIndex { $0.id == track.id } ?? 0) } }) }
-        }.padding(18).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
+            if kind == "work" { ForEach(performance) { track in TrackRow(model: model, track: track, play: { Task { await model.playback.play(performance, start: performance.firstIndex { $0.id == track.id } ?? 0) } }) } }
+        }.padding(18).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
+            .contentShape(RoundedRectangle(cornerRadius: 14)).onTapGesture { if kind == "artist" { model.go(.album(album.id)) } }
     }
     private var story: StoryRequest? {
         guard loaded else { return nil }

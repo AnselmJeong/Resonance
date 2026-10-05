@@ -47,7 +47,7 @@ enum DiscoveryMigration {
         let known = try String.fetchAll(db, sql: """
         WITH RECURSIVE nodes(id) AS (SELECT ? UNION SELECT ? UNION
           SELECT CASE WHEN l.localID=n.id THEN l.canonicalID ELSE l.localID END
-          FROM identityLink l JOIN nodes n ON l.localID=n.id OR l.canonicalID=n.id WHERE l.kind=?)
+          FROM identityLink l JOIN nodes n ON l.localID=n.id OR l.canonicalID=n.id WHERE l.kind=? AND l.source<>'name')
         SELECT id FROM nodes WHERE id LIKE 'mb:%'
         """, arguments: [local, target, kind])
         guard Set(known).count <= 1 else { return }

@@ -19,7 +19,7 @@ struct MatchReviewView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack { VStack(alignment: .leading, spacing: 5) { Text("판과 크레디트 검토").font(.title2.weight(.semibold)); Text("\(album.title) · \(local.count) 트랙 · UPC \(album.barcode.isEmpty ? "없음" : album.barcode)").foregroundStyle(.secondary).font(.callout) }; Spacer(); Button("닫기") { job?.cancel(); dismiss() }.keyboardShortcut(.cancelAction) }.padding(24)
             Divider()
-            ScrollView {
+            ScrollViewReader { reader in ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if let confirmed {
                         Label("연결된 판: \(confirmed.candidate.title)", systemImage: "checkmark.seal").foregroundStyle(.tint)
@@ -28,12 +28,12 @@ struct MatchReviewView: View {
                     Text("후보 점수는 일치 근거의 합계이며 정확도 확률이 아닙니다. 다른 CD·디지털 판을 구분하고 트랙별 대응을 확인하세요.").font(.callout).foregroundStyle(.secondary).lineSpacing(3)
                     HStack { Button("MusicBrainz 후보 찾기") { search(force: false) }.disabled(busy || !model.settings.enabled); Button("다시 조회") { search(force: true) }.disabled(busy || !model.settings.enabled); if !model.settings.enabled { SettingsLink { Text("온라인 정보 활성화…") } } }
                     ForEach(candidates) { candidate in candidateCard(candidate) }
-                    if let preview { previewContent(preview) }
+                    if let preview { previewContent(preview).id("preview") }
                     if busy { HStack { ProgressView().controlSize(.small); Text("MusicBrainz 자료를 읽고 있습니다. 요청 간격을 유지합니다.").font(.caption); Spacer(); Button("취소") { job?.cancel() } } }
                     if let error { Text(error).foregroundStyle(.orange).font(.callout) }
                     Link("MusicBrainz 제공 · 데이터와 라이선스", destination: URL(string: "https://musicbrainz.org/doc/About/Data_License")!).font(.caption)
                 }.padding(24)
-            }
+            }.onChange(of: preview?.candidate.id) { _, id in if id != nil { withAnimation { reader.scrollTo("preview", anchor: .top) } } } }
         }.frame(width: 780, height: 670).task { confirmed = try? await model.db.confirmedMatch(album.id); candidates = model.discovery.states[album.id]?.snapshot?.candidates ?? [] }.onDisappear { job?.cancel() }
     }
     private func candidateCard(_ candidate: ReleaseCandidate) -> some View {
@@ -51,12 +51,18 @@ struct MatchReviewView: View {
     }
     private func previewContent(_ match: ReleaseMatch) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            Divider(); Text("트랙별 대응 확인").font(.headline)
+            Divider(); Text("트랙별 대응 확인 · \(match.candidate.title)").font(.headline)
+            // The decision sits above the list so it is found without scrolling past every track.
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("디스크·트랙 순서와 제목을 검토했으며 이 판으로 연결합니다", isOn: $orderReviewed)
+                HStack {
+                    Button("이 판으로 연결") {
+                        run { try await model.db.confirmMatch(albumID: album.id, match: match, approvedOrder: orderReviewed); confirmed = match; model.discovery.changed(album.id); await model.reload(); dismiss() }
+                    }.buttonStyle(.borderedProminent).disabled(busy || !orderReviewed || match.tracks.count != local.count)
+                    if match.tracks.count != local.count { Text("트랙 수가 다릅니다 (내 앨범 \(local.count) · 이 판 \(match.tracks.count)). 연결할 수 없습니다.").font(.caption).foregroundStyle(.orange) }
+                }
+            }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             ForEach(local) { track in correspondence(track, match: match) }
-            Toggle("디스크·트랙 순서와 제목을 검토했으며 이 판으로 연결합니다", isOn: $orderReviewed)
-            Button("이 판으로 연결") {
-                run { try await model.db.confirmMatch(albumID: album.id, match: match, approvedOrder: orderReviewed); confirmed = match; model.discovery.changed(album.id); await model.reload() }
-            }.buttonStyle(.borderedProminent).disabled(busy || !orderReviewed || match.tracks.count != local.count)
         }
     }
     private func correspondence(_ track: Track, match: ReleaseMatch) -> some View {

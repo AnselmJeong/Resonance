@@ -21,18 +21,45 @@ extension LibraryDatabase {
         let members = try identityMembers(id, kind: kind)
         return members.first(where: { $0.hasPrefix("mb:") }) ?? members.first ?? id
     }
-    public func linkIdentity(_ id: String, to target: String, kind: String) throws {
-        guard ["artist", "work"].contains(kind), id != target else { return }
-        let exists = kind == "artist" ? try artist(id) != nil && artist(target) != nil : try work(id) != nil && work(target) != nil
-        guard exists else { throw AppError.message("연결할 대상을 찾지 못했습니다.") }
-        let members = Set(try identityMembers(id, kind: kind) + identityMembers(target, kind: kind))
-        guard members.filter({ $0.hasPrefix("mb:") }).count <= 1 else { throw AppError.message("서로 다른 MusicBrainz ID입니다. 외부 매칭을 먼저 검토하세요.") }
-        try pool.write { db in try db.execute(sql: "INSERT OR REPLACE INTO identityLink(kind,localID,canonicalID,source,albumID) VALUES(?,?,?,'user','')", arguments: [kind, id, target]) }
+    public func linkIdentity(_ id: String, to target: String, kind: String) throws { try linkIdentities(id, to: [target], kind: kind) }
+    /// Joins several confirmed entries to `id` at once, all or nothing.
+    /// A user link is keyed by its local end, so each new edge hangs off a member that has none yet; earlier links are never replaced.
+    public func linkIdentities(_ id: String, to targets: [String], kind: String) throws {
+        guard ["artist", "work"].contains(kind) else { return }
+        func exists(_ value: String) throws -> Bool { kind == "artist" ? try artist(value) != nil : try work(value) != nil }
+        guard try exists(id) else { throw AppError.message("연결할 대상을 찾지 못했습니다.") }
+        var joined = Set(try identityMembers(id, kind: kind)), groups: [Set<String>] = []
+        for target in targets where !joined.contains(target) {
+            guard try exists(target) else { throw AppError.message("연결할 대상을 찾지 못했습니다.") }
+            let members = Set(try identityMembers(target, kind: kind))
+            groups.append(members); joined.formUnion(members)
+        }
+        guard !groups.isEmpty else { return }
+        guard joined.filter({ $0.hasPrefix("mb:") }).count <= 1 else { throw AppError.message("서로 다른 MusicBrainz ID입니다. 외부 매칭을 먼저 검토하세요.") }
+        var taken = Set(try pool.read { db in try String.fetchAll(db, sql: "SELECT localID FROM identityLink WHERE kind=? AND source='user' AND albumID=''", arguments: [kind]) })
+        var linked = Set(try identityMembers(id, kind: kind)), edges: [(String, String)] = []
+        for members in groups {
+            if let free = members.sorted().first(where: { !taken.contains($0) }) { edges.append((free, id)); taken.insert(free) }
+            else if let free = linked.sorted().first(where: { !taken.contains($0) }), let target = members.sorted().first { edges.append((free, target)); taken.insert(free) }
+            else { throw AppError.message("기존 수동 연결이 얽혀 있습니다. 연결을 해제한 뒤 다시 시도하세요.") }
+            linked.formUnion(members)
+        }
+        try pool.write { db in
+            for (local, canonical) in edges { try db.execute(sql: "INSERT INTO identityLink(kind,localID,canonicalID,source,albumID) VALUES(?,?,?,'user','')", arguments: [kind, local, canonical]) }
+        }
     }
+    /// Undoes the listener's links and the automatic same-name links of this group; those names then stay apart until linked by hand.
     public func unlinkIdentity(_ id: String, kind: String) throws {
         let members = try identityMembers(id, kind: kind)
+        let names = kind == "artist" ? try members.compactMap { try artist($0)?.name }.map(TextKey.normalize) : []
+        let split = Set(try preference(NamesakeLinks.splitKey, as: [String].self) ?? []).union(names)
+        let data = try json(split.sorted())
         try pool.write { db in
             for member in members { try db.execute(sql: "DELETE FROM identityLink WHERE kind=? AND source='user' AND (localID=? OR canonicalID=?)", arguments: [kind, member, member]) }
+            if kind == "artist" {
+                try db.execute(sql: "INSERT OR REPLACE INTO preference(key,data) VALUES(?,?)", arguments: [NamesakeLinks.splitKey, data])
+                try NamesakeLinks.rebuild(db)
+            }
         }
     }
     public func displayTracks(_ tracks: [Track]) throws -> [Track] {

@@ -24,14 +24,15 @@ import CoreText
         return ReleaseMatch(candidate: candidate, tracks: [MatchedTrack(disc: 1, number: 1, title: track.title, recordingID: "recording-" + track.id,
             credits: [Credit(artistID: artistID, name: "Same Name", role: "performer", source: "musicbrainz", attributes: ["piano"])], works: [Work(id: workID, title: "Shared Piece", source: "musicbrainz")], duration: track.duration, recordingDate: "2019-05-01")])
     }
-    @Test func identityRequiresEvidenceAndRemovalPreservesLocalCredits() async throws {
+    @Test func matchedAndSameNamedCreditsJoinAndRemovalPreservesLocalCredits() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let (db, _, albums, tracks) = try await fixture(directory)
         #expect(try await db.artistTracks("local0").count == 1)
         #expect(try await db.relatedAlbums(trackID: "track0").allSatisfy { $0.reason.contains("미확인") })
         for i in 0..<2 { try await db.confirmMatch(albumID: albums[i].id, match: match(tracks[i])) }
-        #expect(Set(try await db.artistTracks("local0").map(\.id)) == ["track0", "track1"])
+        // The matched pair joins by MusicBrainz ID; the third album's same-named performer joins by name.
+        #expect(Set(try await db.artistTracks("local0").map(\.id)) == ["track0", "track1", "track2"])
         #expect(Set(try await db.workTracks("mb:work").map(\.id)) == ["track0", "track1"])
         #expect(try await db.track("track0")?.credits.count == 1)
         #expect(try await db.rawTrack("track0")?.credits.count == 2)
@@ -41,7 +42,7 @@ import CoreText
         try await db.upsert(album: albums[0], tracks: [tracks[0]], scanID: "rescan")
         #expect(try await db.track("track0")?.credits.first?.attributes == ["piano"])
         try await db.removeMatch(albumID: albums[0].id)
-        #expect(try await db.artistTracks("local0").map(\.id) == ["track0"])
+        #expect(Set(try await db.artistTracks("local0").map(\.id)) == ["track0", "track1", "track2"])
         #expect(try await db.workTracks("mb:work").map(\.id) == ["track1"])
         #expect(try await db.track("track0")?.credits.first?.source == "local")
         #expect(try await db.preference("metadata-skip:album0", as: Bool.self) == true)
@@ -59,6 +60,37 @@ import CoreText
         try await db.confirmMatch(albumID: albums[1].id, match: match(tracks[1], artistID: "mb:two"))
         do { try await db.linkIdentity("local0", to: "local1", kind: "artist"); Issue.record("Different external people merged") } catch {}
         #expect(try await db.artistTracks("local0").count == 1)
+    }
+    @Test func sameNamedMusiciansJoinUnlessSplitOrKnownApart() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (db, _, albums, tracks) = try await fixture(directory)
+        try await db.linkNamesakes()
+        #expect(try await db.artistTracks("local0").count == 3)
+        try await db.unlinkIdentity("local1", kind: "artist")
+        try await db.linkNamesakes()
+        #expect(try await db.artistTracks("local0").count == 1)
+        try await db.linkIdentities("local0", to: ["local1"], kind: "artist")
+        #expect(try await db.artistTracks("local0").count == 2)
+        // Two MusicBrainz people with one name are never joined by the name alone.
+        let other = directory.appendingPathComponent("other")
+        let (fresh, _, _, _) = try await fixture(other)
+        try await fresh.confirmMatch(albumID: albums[0].id, match: match(tracks[0], artistID: "mb:one"))
+        try await fresh.confirmMatch(albumID: albums[1].id, match: match(tracks[1], artistID: "mb:two"))
+        #expect(try await fresh.artistTracks("local0").count == 1)
+        #expect(try await fresh.artistTracks("local2").count == 1)
+    }
+    @Test func severalNamesakesLinkTogetherWithoutDroppingEarlierLinks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (db, _, _, _) = try await fixture(directory)
+        try await db.linkIdentity("local0", to: "local1", kind: "artist")
+        try await db.linkIdentity("local0", to: "local2", kind: "artist")
+        #expect(try await db.artistTracks("local0").count == 3)
+        try await db.unlinkIdentity("local0", kind: "artist")
+        try await db.linkIdentities("local0", to: ["local1", "local2", "local1"], kind: "artist")
+        #expect(Set(try await db.identityMembers("local2", kind: "artist")) == ["local0", "local1", "local2"])
+        #expect(try await db.identityCandidates("local0", kind: "artist", query: "Same Name").isEmpty)
     }
     @Test func explicitTagIDsConnectWithoutNetworkAndRemainAfterRescan() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

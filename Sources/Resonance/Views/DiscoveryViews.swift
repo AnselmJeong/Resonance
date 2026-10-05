@@ -138,29 +138,48 @@ struct IdentityLinkView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var candidates: [IdentityCandidate] = []
+    @State private var selected: Set<String> = []
+    @State private var revision = 0
     @State private var message: String?
+    private var namesakes: [String] { candidates.filter { TextKey.normalize($0.name) == TextKey.normalize(name) }.map(\.id) }
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack { Text("동일한 \(kind == "artist" ? "음악가" : "작품") 연결").font(.title2); Spacer(); Button("닫기") { dismiss() } }
-            Text("\(name)과 같은 대상인지 참여 음반을 확인한 뒤 연결하세요. 원본 태그는 유지됩니다.").font(.callout).foregroundStyle(.secondary)
+            Text(kind == "artist" ? "이름이 같은 음악가는 자동으로 묶입니다. 표기가 다른 같은 사람은 골라서 한 번에 연결하고, 다른 사람이 섞였다면 연결을 모두 푼 뒤 다시 고르세요. 원본 태그는 유지됩니다." : "\(name)과 같은 대상인지 참여 음반을 확인한 뒤 골라서 한 번에 연결하세요. 원본 태그는 유지됩니다.").font(.callout).foregroundStyle(.secondary)
             TextField("이름 또는 작품명 검색", text: $query).textFieldStyle(.roundedBorder)
             List(candidates) { candidate in
-                HStack {
+                Toggle(isOn: Binding(get: { selected.contains(candidate.id) }, set: { if $0 { selected.insert(candidate.id) } else { selected.remove(candidate.id) } })) {
                     VStack(alignment: .leading, spacing: 5) { Text(candidate.name); Text(candidate.detail).font(.caption).foregroundStyle(.secondary).lineLimit(3) }
-                    Spacer()
-                    Button("같은 대상으로 연결") {
-                        Task { do { try await model.db.linkIdentity(entityID, to: candidate.id, kind: kind); model.discovery.changed(); dismiss() } catch { message = error.localizedDescription } }
-                    }
-                }.padding(.vertical, 8)
+                        .padding(.leading, 6).frame(maxWidth: .infinity, alignment: .leading)
+                }.toggleStyle(.checkbox).padding(.vertical, 8)
             }.overlay { if candidates.isEmpty { ContentUnavailableView("연결할 다른 항목이 없습니다", systemImage: "person.crop.circle.badge.questionmark", description: Text("이름이나 작품명을 바꿔 검색해 보세요.")) } }
-            if let message { Text(message).font(.caption).foregroundStyle(.orange) }
-            Button("이 대상의 수동 연결 해제") { Task { do { try await model.db.unlinkIdentity(entityID, kind: kind); model.discovery.changed(); dismiss() } catch { message = error.localizedDescription } } }
+            if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+            HStack {
+                Button(kind == "artist" ? "연결 모두 풀기" : "이 대상의 수동 연결 해제") { Task { do { try await model.db.unlinkIdentity(entityID, kind: kind); model.discovery.changed(); dismiss() } catch { message = error.localizedDescription } } }
+                Spacer()
+                if !namesakes.isEmpty {
+                    Button(Set(namesakes).isSubset(of: selected) ? "선택 해제" : "같은 이름 \(namesakes.count)개 모두 선택") {
+                        if Set(namesakes).isSubset(of: selected) { selected.removeAll() } else { selected.formUnion(namesakes) }
+                    }
+                }
+                Button("선택한 \(selected.count)개 연결") { link() }.buttonStyle(.borderedProminent).disabled(selected.isEmpty)
+            }
         }.padding(24).frame(width: 650, height: 510)
             .onAppear { query = name }
-            .task(id: query) {
+            .task(id: "\(query)|\(revision)") {
                 try? await Task.sleep(for: .milliseconds(250)); guard !Task.isCancelled else { return }
                 let found = (try? await model.db.identityCandidates(entityID, kind: kind, query: query)) ?? []
-                guard !Task.isCancelled else { return }; candidates = found
+                guard !Task.isCancelled else { return }; candidates = found; selected.formIntersection(found.map(\.id))
             }
+    }
+    /// Stays open on the refreshed list so further matches can be joined without reopening.
+    private func link() {
+        let targets = candidates.map(\.id).filter(selected.contains)
+        Task {
+            do {
+                try await model.db.linkIdentities(entityID, to: targets, kind: kind)
+                selected = []; message = "\(targets.count)개 항목을 연결했습니다."; revision += 1; model.discovery.changed()
+            } catch { message = error.localizedDescription }
+        }
     }
 }

@@ -66,6 +66,7 @@ public actor LibraryDatabase {
             // Folder reconciliation updates search rows per album; avoid a full-table walk for every album.
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS searchContent_albumID ON searchContent(albumID)")
         }
+        migrator.registerMigration("v10-namesake-links") { db in try NamesakeLinks.rebuild(db) }
         if hadDatabase, try !pool.read({ try migrator.hasCompletedMigrations($0) }) {
             let backupPath = path + ".before-migration-\(Int(Date().timeIntervalSince1970)).sqlite"
             try pool.backup(to: DatabaseQueue(path: backupPath))
@@ -385,6 +386,7 @@ public actor LibraryDatabase {
                 }
             }
             try DiscoveryMigration.rebuild(db, albumID: albumID)
+            try NamesakeLinks.rebuild(db)
         }
     }
     public func removeMatch(albumID: String) throws {
@@ -403,6 +405,7 @@ public actor LibraryDatabase {
                 try db.execute(sql: "UPDATE recording SET mbid=NULL WHERE trackID=?", arguments: [track.id])
                 try Self.index(db, id: track.id, kind: "track", title: track.title, subtitle: ([album.title, album.artist, album.label] + track.credits.map(\.name)).joined(separator: " · "), albumID: album.id, sectionID: album.sectionID, format: track.format)
             }
+            try NamesakeLinks.rebuild(db)
         }
     }
 }

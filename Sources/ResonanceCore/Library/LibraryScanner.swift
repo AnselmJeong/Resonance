@@ -206,6 +206,7 @@ public actor LibraryScanner {
             state.phase = "라이브러리를 정리하고 있습니다"; await progress(state)
             try Task.checkCancellation()
             if relativeFolder == nil { try await db.finishScan(root: root, scanID: scanID, coverage: coverage) }
+            try await db.linkNamesakes()
             // Completion describes coverage, not the absence of individual file errors.
             // A fully traversed root replaces old failure history with this run's current issues.
             state.finished = root.smb == nil || walkErrors.isEmpty
