@@ -9,6 +9,8 @@ struct StoryPanel: View {
     var auto = true
     /// Narrow column (Now Playing inspector): no card chrome, smaller type.
     var compact = false
+    /// Sits beside a header (musician, work) rather than centred under it as on album pages.
+    var leading = false
     @State private var expanded = false
     @State private var editing = false
     @State private var reading = false
@@ -53,7 +55,7 @@ struct StoryPanel: View {
         .padding(.horizontal, compact ? 0 : 34).padding(.vertical, compact ? 0 : 28)
         .frame(maxWidth: compact ? .infinity : 760, alignment: .leading)
         .background { if !compact { card } }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: leading ? .leading : .center)
         .task(id: "\(request.entityID)|\(model.settings.language)|\(model.settings.enabled)|\(model.settings.model)") {
             expanded = false
             await model.stories.prepare(request, settings: model.settings, auto: auto)

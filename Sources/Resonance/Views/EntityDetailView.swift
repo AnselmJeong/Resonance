@@ -15,6 +15,9 @@ struct EntityDetailView: View {
     @State private var alias = ""
     @State private var linking = false
     @State private var loaded = false
+    @State private var width: CGFloat = 0
+    /// Room for the story beside the name instead of under it.
+    private var wide: Bool { width >= 980 }
     private var key: String { kind + ":" + entityID }
     private var state: DetailState { model.detailStates[key] ?? DetailState() }
     private var title: String { artist?.name ?? work?.title ?? "" }
@@ -78,13 +81,22 @@ struct EntityDetailView: View {
                         }
                     }.id("namesakes")
                 }
-                if let story { StoryPanel(model: model, request: story).id("story") }
             }.padding(28).scrollTargetLayout()
         }.scrollPosition(id: binding(\.scroll))
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
             .task(id: entityID + String(model.discovery.revision)) { await load() }
             .sheet(isPresented: $linking) { IdentityLinkView(model: model, entityID: entityID, kind: kind, name: title) }
     }
+    /// Name and counts with the story beside them, like the album page's lead text; stacked when the window is narrow.
+    /// One layout for both so the story keeps its state while the window is resized.
     private var header: some View {
+        let layout = wide ? AnyLayout(HStackLayout(alignment: .top, spacing: 36)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 24))
+        return layout {
+            identity.frame(width: wide ? 380 : nil, alignment: .leading).frame(maxWidth: wide ? nil : .infinity, alignment: .leading)
+            if let story { StoryPanel(model: model, request: story, leading: wide) }
+        }
+    }
+    private var identity: some View {
         HStack(alignment: .top, spacing: 20) {
             Image(systemName: kind == "artist" ? "person.crop.circle" : "music.quarternote.3").font(.system(size: 52, weight: .ultraLight)).foregroundStyle(.tint).frame(width: 90, height: 90).background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
             VStack(alignment: .leading, spacing: 10) {
@@ -93,8 +105,7 @@ struct EntityDetailView: View {
                 Text("내 라이브러리의 \(Set(tracks.map(\.albumID)).count) 앨범 · \(tracks.count) 트랙").foregroundStyle(.secondary)
                 if !subjectID.hasPrefix("mb:") { Text("로컬 태그의 대상입니다. 같은 이름의 다른 항목은 확인 후 연결할 수 있습니다.").font(.caption).foregroundStyle(.secondary) }
                 Button("동일 \(kind == "artist" ? "음악가" : "작품") 연결 관리…") { linking = true }.buttonStyle(.borderless)
-            }
-            Spacer()
+            }.fixedSize(horizontal: false, vertical: true)
         }
     }
     private var filters: some View {
