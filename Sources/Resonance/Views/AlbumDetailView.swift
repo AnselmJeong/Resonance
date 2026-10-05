@@ -20,8 +20,16 @@ struct AlbumDetailView: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("ALBUM").font(.caption.weight(.semibold)).tracking(2).foregroundStyle(.secondary)
                                 Text(album.title).font(.system(size: 30, weight: .semibold)).textSelection(.enabled)
-                                if let performer = tracks.flatMap(\.credits).first(where: { $0.role == "performer" && $0.name == album.artist }) {
-                                    Button(album.artist) { model.go(.artist(performer.artistID)) }.buttonStyle(.plain).foregroundStyle(.tint).font(.title3)
+                                let artists = albumArtists(album)
+                                if artists.count == 1 {
+                                    Button(album.artist) { model.go(.artist(artists[0].artistID)) }.buttonStyle(.plain).foregroundStyle(.tint).font(.title3)
+                                } else if artists.count > 1 {
+                                    HStack(spacing: 6) {
+                                        ForEach(Array(artists.enumerated()), id: \.element.artistID) { index, credit in
+                                            if index > 0 { Text("·").foregroundStyle(.secondary) }
+                                            Button(credit.name) { model.go(.artist(credit.artistID)) }.buttonStyle(.plain).foregroundStyle(.tint)
+                                        }
+                                    }.font(.title3)
                                 } else { Text(album.artist).font(.title3).foregroundStyle(.secondary) }
                                 Text([album.year, album.label, "\(tracks.count)곡", clockText(album.duration)].filter { !$0.isEmpty }.joined(separator: " · ")).font(.callout).foregroundStyle(.secondary)
                                 if let first = tracks.first { Text("원본 음원  \(first.sourceFormat)").font(.caption).foregroundStyle(.secondary) }
@@ -65,6 +73,17 @@ struct AlbumDetailView: View {
                 .sheet(isPresented: $editVisible, onDismiss: { Task { await load(); await model.reload() } }) { AlbumEditView(model: model, album: album) }
             } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
         }.task(id: albumID + String(model.discovery.revision)) { await load() }
+    }
+    /// Album-artist tag to musician pages. Spellings differ between tags and MusicBrainz (ü/u, ‐/-), so names are compared normalized;
+    /// "A & B" links each performer it names.
+    private func albumArtists(_ album: Album) -> [Credit] {
+        let key = TextKey.normalize(album.artist)
+        var seen = Set<String>()
+        let credits = tracks.flatMap(\.credits).filter { ["performer", "conductor", "ensemble"].contains($0.role) && seen.insert($0.artistID).inserted }
+        if let exact = credits.first(where: { TextKey.normalize($0.name) == key }) { return [exact] }
+        let padded = " \(key) "
+        func position(_ credit: Credit) -> String.Index? { let name = TextKey.normalize(credit.name); return name.isEmpty ? nil : padded.range(of: " \(name) ")?.lowerBound }
+        return credits.filter { position($0) != nil }.sorted { position($0)! < position($1)! }
     }
     private func load() async { do { let loadedTracks = try await model.db.tracks(albumID: albumID), loaded = try await model.db.album(albumID); tracks = loadedTracks; if let loaded { album = loaded; album = await model.refreshBooklets(loaded) } else { album = nil } } catch { model.error = error.localizedDescription } }
 }
