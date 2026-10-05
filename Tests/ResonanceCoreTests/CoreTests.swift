@@ -32,6 +32,36 @@ import GRDB
         try await db.saveRoot(root); try await db.saveSection(section); try await db.upsert(album: album, tracks: [track], scanID: "scan")
         return (db, root, section, album, track)
     }
+    @Test func testScannerPersistsExactFailuresAndReportsSmallScans() async throws {
+        let dir = try temporary(), music = dir.appendingPathComponent("Artist"), db = try database(dir)
+        try writeAudio(music, path: "Player/Album/01.flac", tags: ["ALBUM=Album", "TITLE=Good"])
+        let bad = music.appendingPathComponent("Player/Album/02.flac")
+        try Data("broken".utf8).write(to: bad)
+        let unsupported = music.appendingPathComponent("Player/Album/03.ape")
+        try Data().write(to: unsupported)
+        let root = LibraryRoot(path: music.path); try await db.saveRoot(root)
+        let scanner = LibraryScanner(database: db, cache: dir.appendingPathComponent("cache"))
+        actor Updates {
+            var values: [ScanProgress] = []
+            func add(_ value: ScanProgress) { values.append(value) }
+        }
+        let updates = Updates()
+        let first = try await scanner.scan(root: root) { await updates.add($0) }
+        #expect(first.finished && first.discovered == 3 && first.processed == 2)
+        let captured = await updates.values
+        #expect(captured.first?.processed == 0 && captured.first?.finished == false)
+        #expect(captured.contains { $0.phase == "라이브러리를 정리하고 있습니다" && !$0.finished })
+        #expect(captured.last?.finished == true)
+        let stats = try await db.statistics()
+        #expect(stats.albums == 1 && stats.songs == 2)
+        #expect(Set(stats.failures.map { URL(fileURLWithPath: $0.path).lastPathComponent }) == Set(["02.flac", "03.ape"]))
+        _ = try await scanner.scan(root: root) { _ in }
+        #expect(try await db.statistics().failures.count == 2) // Reused unsupported files stay visible.
+        try writeAudio(music, path: "Player/Album/02.flac", tags: ["ALBUM=Album", "TITLE=Repaired"])
+        try FileManager.default.removeItem(at: unsupported)
+        _ = try await scanner.scan(root: root) { _ in }
+        #expect(try await db.statistics().failures.isEmpty)
+    }
     @Test func testFLACRepeatedTagsAndBounds() throws {
         let dir = try temporary(), url = dir.appendingPathComponent("valid.flac")
         try flac(tags: ["album=Mémoire", "COMPOSER=Charles Gounod", "composer=Germaine Tailleferre", "TRACKNUMBER=1/27"]).write(to: url)
@@ -82,12 +112,12 @@ import GRDB
         try await db.setFavorite("scoped-2", value: true)
         try await db.setFavorite("scoped-3", value: true)
         #expect(try await db.albums(rootID: roots[0].id, favorites: true).map(\.id) == ["scoped-2"])
-        // The imported root remains authoritative even after a custom collection move.
-        try await db.editAlbum("scoped-2", title: "Album 2", artist: "Same artist", sectionID: sections[1].id)
+        // Display edits and obsolete hidden flags never override folder membership or hide music.
+        try await db.editAlbum("scoped-2", title: "Album 2", artist: "Same artist")
         #expect(try await db.albums(rootID: roots[0].id).map(\.id) == ["scoped-0", "scoped-2", "scoped-4"])
         var hidden = sections[0]; hidden.hidden = true; try await db.saveSection(hidden)
-        #expect(try await db.albums(rootID: roots[0].id).map(\.id) == ["scoped-2"])
-        #expect(try await db.albums().count == 3)
+        #expect(try await db.albums(rootID: roots[0].id).map(\.id) == ["scoped-0", "scoped-2", "scoped-4"])
+        #expect(try await db.albums().count == 5)
     }
 
     @Test func testRootSearchUsesTrackRelationshipsForSharedEntities() async throws {
@@ -143,7 +173,7 @@ import GRDB
         let albums = try await db.albums(); #expect(albums.count == 2)
         let joined = try #require(albums.first { $0.trackCount == 2 }), tracks = try await db.tracks(albumID: joined.id)
         #expect(tracks.map(\.disc) == [1, 2])
-        try await db.editAlbum(joined.id, title: "수동 표시명", artist: "수동 연주자", sectionID: joined.sectionID)
+        try await db.editAlbum(joined.id, title: "수동 표시명", artist: "수동 연주자")
         try await db.setFavorite(joined.id, value: true)
         let second = try await scanner.scan(root: root) { _ in }
         #expect(second.reused == 3)
@@ -212,7 +242,7 @@ import GRDB
         let favorite = try #require(fragments.values.first { $0.0.artist == "Kreisler" })
         let aliasTrack = try #require(fragments.values.first { $0.0.artist == "Ricci" }?.1.first), artistID = aliasTrack.credits[0].artistID
         try await seed!.setFavorite(favorite.0.id, value: true)
-        try await seed!.editAlbum(favorite.0.id, title: "My Tribute CD1", artist: "My compilation", sectionID: section.id)
+        try await seed!.editAlbum(favorite.0.id, title: "My Tribute CD1", artist: "My compilation")
         try await seed!.addAlias(artistID: artistID, alias: "Legacy alias")
         let queue = QueueSnapshot(entries: originalTracks.prefix(3).map { QueueEntry(trackID: $0.id) }, index: 1, position: 12)
         try await seed!.setPreference("queue", value: queue)
@@ -311,8 +341,8 @@ import GRDB
         }
         try await db.confirmMatch(albumID: otherAlbum.id, match: match(otherAlbum, otherTrack))
         try await db.confirmMatch(albumID: album.id, match: match(album, track))
-        try await db.editAlbum(album.id, title: "Removed library title", artist: album.artist, sectionID: section.id)
-        try await db.editAlbum(otherAlbum.id, title: otherAlbum.title, artist: otherAlbum.artist, sectionID: section.id)
+        try await db.editAlbum(album.id, title: "Removed library title", artist: album.artist)
+        try await db.editAlbum(otherAlbum.id, title: otherAlbum.title, artist: otherAlbum.artist)
         let entries = [QueueEntry(trackID: track.id), QueueEntry(trackID: otherTrack.id)]
         try await db.setPreference("queue", value: QueueSnapshot(entries: entries, index: 1, position: 23.5))
         let removed = try await db.removeRoot(root.id)
@@ -346,7 +376,7 @@ import GRDB
         for n in 1...50 { try writeAudio(music, path: "Album/\(n).flac", tags: ["ALBUM=Scan fixture", "TRACKNUMBER=\(n)"]) }
         let root = LibraryRoot(path: music.path); try await db.saveRoot(root)
         let scanner = LibraryScanner(database: db, cache: dir.appendingPathComponent("cache"))
-        let task = Task { try await scanner.scan(root: root) { _ in withUnsafeCurrentTask { $0?.cancel() } } }
+        let task = Task { try await scanner.scan(root: root) { update in if update.processed >= 25 { withUnsafeCurrentTask { $0?.cancel() } } } }
         let progress = try await task.value
         #expect(progress.cancelled)
         #expect(progress.processed == 25)

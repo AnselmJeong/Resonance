@@ -12,7 +12,7 @@ public struct AudioMetadata: Sendable {
     public func value(_ keys: String...) -> String { keys.compactMap { tags[$0]?.first }.first(where: { !$0.isEmpty }) ?? "" }
 }
 
-private struct ByteReader {
+struct ByteReader {
     let data: Data; var offset = 0
     mutating func bytes(_ count: Int) throws -> Data {
         guard count >= 0, count <= data.count - offset else { throw AppError.message("잘린 FLAC 메타데이터") }
@@ -28,7 +28,14 @@ public enum MetadataReader {
     public static func flac(_ url: URL) throws -> AudioMetadata {
         let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
         let fileSize = UInt64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-        guard try handle.read(upToCount: 4) == Data("fLaC".utf8) else { throw AppError.message("FLAC 헤더가 올바르지 않습니다.") }
+        var signature = try handle.read(upToCount: 4) ?? Data()
+        if signature.prefix(3) == Data("ID3".utf8) {
+            let header = signature + (try handle.read(upToCount: 6) ?? Data())
+            let offset = try FLACPrefix.streamOffset(after: header, fileSize: Int64(fileSize))
+            try handle.seek(toOffset: UInt64(offset))
+            signature = try handle.read(upToCount: 4) ?? Data()
+        }
+        guard signature == Data("fLaC".utf8) else { throw AppError.message("FLAC 헤더가 올바르지 않습니다.") }
         var result = AudioMetadata(), total = 0
         for _ in 0..<512 {
             guard let header = try handle.read(upToCount: 4), header.count == 4 else { throw AppError.message("잘린 FLAC block header") }

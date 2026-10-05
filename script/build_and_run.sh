@@ -13,8 +13,17 @@ BIN_DIR="$(swift build --configuration "$CONFIGURATION" --show-bin-path)"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 STAGING="$ROOT_DIR/dist/$APP_NAME.staging.app"
 rm -rf "$STAGING"
-mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Resources"
+mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Resources" "$STAGING/Contents/Frameworks"
 cp "$BIN_DIR/$APP_NAME" "$STAGING/Contents/MacOS/$APP_NAME"
+# The LGPL SMB library remains dynamically replaceable, with no Homebrew dependency.
+cp "$BIN_DIR/libAMSMB2.dylib" "$STAGING/Contents/Frameworks/"
+install_name_tool -add_rpath '@executable_path/../Frameworks' "$STAGING/Contents/MacOS/$APP_NAME"
+codesign --force --sign - "$STAGING/Contents/Frameworks/libAMSMB2.dylib"
+mkdir -p "$STAGING/Contents/Resources/Licenses"
+cp "$ROOT_DIR/.build/checkouts/AMSMB2/LICENSE" "$STAGING/Contents/Resources/Licenses/AMSMB2-LGPL-2.1.txt"
+cp "$ROOT_DIR/Resources/SMB-NOTICE.txt" "$STAGING/Contents/Resources/Licenses/"
+# Include the exact library source and build manifests with distributed binaries.
+tar -czf "$STAGING/Contents/Resources/Licenses/AMSMB2-4.0.3-source.tar.gz" -C "$ROOT_DIR/.build/checkouts/AMSMB2" AMSMB2 Dependencies Package.swift Package@swift-6.0.swift LICENSE README.md
 for resource in "$BIN_DIR"/*.bundle; do if [ -d "$resource" ]; then cp -R "$resource" "$STAGING/Contents/Resources/"; fi; done
 if [ -f "$ROOT_DIR/Resources/AppIcon.icns" ]; then cp "$ROOT_DIR/Resources/AppIcon.icns" "$STAGING/Contents/Resources/"; fi
 cp "$ROOT_DIR/Resources/Credits.rtf" "$STAGING/Contents/Resources/"
@@ -27,13 +36,13 @@ cat > "$STAGING/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Resonance</string>
 <key>CFBundleDisplayName</key><string>Resonance</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>3</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSLocalNetworkUsageDescription</key><string>선택한 AirPlay 출력으로 음악을 재생합니다.</string>
+<key>NSLocalNetworkUsageDescription</key><string>SMB 음악 서버에서 태그와 음원을 읽고 선택한 AirPlay 출력으로 음악을 재생합니다.</string>
 <key>NSBonjourServices</key><array><string>_raop._tcp</string></array>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>

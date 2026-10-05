@@ -35,7 +35,7 @@ struct AlbumDetailView: View {
                             Button { matchVisible = true } label: { Label("크레디트 검토", systemImage: "person.text.rectangle") }
                             Menu {
                                 Button("앨범 표시 정보 수정…") { editVisible = true }
-                                Button("Finder에서 보기") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: album.folder)]) }
+                                Button("Finder에서 보기") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: album.folder)]) }.disabled(model.roots.first(where: { $0.id == album.rootID })?.smb != nil)
                             } label: { Image(systemName: "ellipsis.circle") }.menuStyle(.borderlessButton).frame(width: 22)
                             if !album.attachments.isEmpty {
                                 Menu("부클릿", systemImage: "doc.richtext") { ForEach(album.attachments, id: \.self) { path in Button(URL(fileURLWithPath: path).lastPathComponent) { model.openBooklet(album, path: path) } } }
@@ -63,7 +63,7 @@ struct AlbumDetailView: View {
             } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
         }.task(id: albumID + String(model.discovery.revision)) { await load() }
     }
-    private func load() async { do { let loadedTracks = try await model.db.tracks(albumID: albumID), loaded = try await model.db.album(albumID); tracks = loadedTracks; if let loaded { album = await model.refreshBooklets(loaded) } else { album = nil } } catch { model.error = error.localizedDescription } }
+    private func load() async { do { let loadedTracks = try await model.db.tracks(albumID: albumID), loaded = try await model.db.album(albumID); tracks = loadedTracks; if let loaded { album = loaded; album = await model.refreshBooklets(loaded) } else { album = nil } } catch { model.error = error.localizedDescription } }
 }
 
 struct TrackRow: View {
@@ -109,17 +109,16 @@ struct AlbumEditView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var artist = ""
-    @State private var sectionID = ""
     @State private var artwork: String?
     @State private var error: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("앨범 표시 정보").font(.title2)
             Text("수정값은 앱에 저장되며 원본 태그와 파일은 보존됩니다.").font(.callout).foregroundStyle(.secondary)
-            Form { TextField("앨범명", text: $title); TextField("아티스트", text: $artist); Picker("컬렉션", selection: $sectionID) { ForEach(model.sections) { Text($0.name).tag($0.id) } }; Button("커버 이미지 선택…") { selectArtwork() } }
+            Form { TextField("앨범명", text: $title); TextField("아티스트", text: $artist); Button("커버 이미지 선택…") { selectArtwork() } }
             if let error { Text(error).foregroundStyle(.red) }
-            HStack { Spacer(); Button("취소") { dismiss() }; Button("저장") { Task { do { try await model.db.editAlbum(album.id, title: title, artist: artist, sectionID: sectionID, artwork: artwork); dismiss() } catch { self.error = error.localizedDescription } } }.buttonStyle(.borderedProminent).disabled(title.isEmpty || artist.isEmpty) }
-        }.padding(26).frame(width: 480).onAppear { title = album.title; artist = album.artist; sectionID = album.sectionID }
+            HStack { Spacer(); Button("취소") { dismiss() }; Button("저장") { Task { do { try await model.db.editAlbum(album.id, title: title, artist: artist, artwork: artwork); dismiss() } catch { self.error = error.localizedDescription } } }.buttonStyle(.borderedProminent).disabled(title.isEmpty || artist.isEmpty) }
+        }.padding(26).frame(width: 480).onAppear { title = album.title; artist = album.artist }
     }
     private func selectArtwork() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.jpeg, .png]; panel.canChooseDirectories = false

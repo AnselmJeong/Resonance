@@ -1,0 +1,14 @@
+Resonance direct SMB transport
+
+AMSMB2 4.0.3, commit 1726aaaf7adf63d7d1d2a0c5d1b0e635028215c0
+https://github.com/amosavian/AMSMB2/tree/4.0.3
+Includes libsmb2. See the included LGPL 2.1 license and complete source archive
+for copyright notices and component licensing. No library source modifications.
+
+The library is linked as Contents/Frameworks/libAMSMB2.dylib. It can be replaced
+with a compatible rebuilt version; re-sign the library and app ad hoc after
+replacement. Reverse engineering for debugging modifications to this library is
+permitted. No warranty is provided by the library authors.
+
+Build the included source using SwiftPM (swift build --product AMSMB2) with the
+Swift toolchain on macOS. The source archive includes both versioned manifests.

@@ -49,7 +49,7 @@ import GRDB
         let music = URL(fileURLWithPath: root.path)
         let original = try #require(try await db.albums().first), tracks = try await db.tracks(albumID: original.id)
         try await db.setFavorite(original.id, value: true)
-        try await db.editAlbum(original.id, title: "My Bach", artist: "My performer", sectionID: original.sectionID)
+        try await db.editAlbum(original.id, title: "My Bach", artist: "My performer")
         try await db.confirmMatch(albumID: original.id, match: match(original, tracks))
         let insight = Insight(entityID: original.id, kind: "album", language: "ko", payload: InsightPayload(sections: [], claims: [], uncertainties: []), evidence: [], model: "fixture")
         try await db.saveInsight(insight)
@@ -63,7 +63,11 @@ import GRDB
         #expect(result.finished); #expect(result.errors.count == 1)
         let albums = try await db.albums(), moved = try #require(albums.first)
         #expect(albums.count == 1); #expect(moved.id == original.id); #expect(moved.favorite)
-        #expect(moved.title == "My Bach"); #expect(moved.artist == "My performer"); #expect(moved.sectionID == original.sectionID)
+        #expect(moved.title == "My Bach"); #expect(moved.artist == "My performer")
+        let collection = try #require(try await db.sections().first { $0.relativePath == "New" })
+        #expect(moved.sectionID == collection.id)
+        #expect(try await db.sections().allSatisfy { $0.relativePath != "Old" })
+        #expect(try await db.search("Piece 1", sectionID: collection.id).contains { $0.kind == "track" })
         #expect(moved.folder.hasSuffix("New/Bach")); #expect(moved.attachments.first?.hasSuffix("New/Bach/booklet.pdf") == true)
         #expect(try await db.tracks(albumID: moved.id).map(\.id) == tracks.map(\.id))
         #expect(try await db.confirmedMatch(moved.id)?.candidate.id == "release")
@@ -95,7 +99,7 @@ import GRDB
         let duplicate = try #require(try await db.albums().first { $0.id != original.id })
         let newTracks = try await db.tracks(albumID: duplicate.id)
         try await db.setFavorite(duplicate.id, value: true)
-        try await db.editAlbum(duplicate.id, title: "Edited new copy", artist: "Performer", sectionID: duplicate.sectionID)
+        try await db.editAlbum(duplicate.id, title: "Edited new copy", artist: "Performer")
         try await db.confirmMatch(albumID: duplicate.id, match: match(duplicate, newTracks))
         let aliasArtist = try #require(newTracks[0].credits.first).artistID
         try await db.addAlias(artistID: aliasArtist, alias: "My alias")
@@ -135,19 +139,22 @@ import GRDB
 
     @Test func ambiguousCopiesAndDifferentEditionsAreNotMerged() async throws {
         let (_, db, root, scanner) = try await fixture()
+        let original = try #require(try await db.albums().first)
         let music = URL(fileURLWithPath: root.path)
         for name in ["Copy1", "Copy2"] { try FileManager.default.copyItem(at: music.appendingPathComponent("Old"), to: music.appendingPathComponent(name)) }
         try FileManager.default.removeItem(at: music.appendingPathComponent("Old"))
         _ = try await scanner.scan(root: root) { _ in }
-        #expect(try await db.albums().count == 3)
-        let stale = try #require(try await db.albums().first { $0.folder.hasSuffix("Old/Bach") })
+        #expect(try await db.albums().count == 2)
+        #expect(try await db.counts().albums == 3) // History is retained but the missing folder is not browsable.
+        let stale = try #require(try await db.album(original.id))
         #expect(try await db.tracks(albumID: stale.id).allSatisfy { !$0.available })
         let (_, other, otherRoot, otherScanner) = try await fixture()
         let otherMusic = URL(fileURLWithPath: otherRoot.path)
         try FileManager.default.removeItem(at: otherMusic.appendingPathComponent("Old"))
         for n in 1...2 { try audio(otherMusic.appendingPathComponent("New/Bach/\(n).flac"), number: n, edition: "different") }
         _ = try await otherScanner.scan(root: otherRoot) { _ in }
-        #expect(try await other.albums().count == 2)
+        #expect(try await other.albums().count == 1)
+        #expect(try await other.counts().albums == 2)
     }
 
     @Test func failedScopesExclusionsAndSymlinksPreserveOnlyTheirRecords() async throws {
@@ -157,9 +164,11 @@ import GRDB
         var coverage = ScanCoverage(); coverage.protectedPaths.insert("Old")
         try await db.finishScan(root: root, scanID: "unknown", coverage: coverage)
         #expect(try await db.tracks(albumID: original.id).allSatisfy(\.available))
+        #expect(try await db.sections().contains { $0.relativePath == "Old" })
         var excluded = root; excluded.exclusions.append("Old")
         _ = try await scanner.scan(root: excluded) { _ in }
         #expect(try await db.tracks(albumID: original.id).allSatisfy(\.available))
+        #expect(try await db.sections().contains { $0.relativePath == "Old" })
         let music = URL(fileURLWithPath: root.path)
         try FileManager.default.removeItem(at: music.appendingPathComponent("Old/Bach/1.flac"))
         try Data("bad".utf8).write(to: music.appendingPathComponent("Old/Bach/2.flac"))
@@ -173,6 +182,84 @@ import GRDB
         #expect(try await db.track(tracks[1].id)?.available == true)
     }
 
+    @Test func removedCollectionDisappearsAndRestoredMusicRecoversHistory() async throws {
+        let (dir, db, root, scanner) = try await fixture()
+        let original = try #require(try await db.albums().first), tracks = try await db.tracks(albumID: original.id)
+        try await db.setFavorite(original.id, value: true)
+        let story = Insight(entityID: original.id, kind: "album", language: "ko", payload: InsightPayload(sections: [], claims: [], uncertainties: []), evidence: [], model: "fixture")
+        try await db.saveInsight(story)
+        let music = URL(fileURLWithPath: root.path), stored = dir.appendingPathComponent("stored")
+        try FileManager.default.moveItem(at: music.appendingPathComponent("Old"), to: stored)
+        // An empty obsolete row can be removed; rows that own album history must remain recoverable.
+        let orphan = LibrarySection(rootID: root.id, relativePath: "Ghost", name: "Ghost")
+        try await db.saveSection(orphan)
+        let removed = try await scanner.scan(root: root) { _ in }
+        #expect(removed.finished); #expect(try await db.sections().isEmpty); #expect(try await db.albums().isEmpty)
+        #expect(try await db.album(original.id)?.favorite == true)
+        #expect(try await db.insight(entityID: original.id, language: "ko")?.id == story.id)
+        #expect(try await db.pool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM section WHERE id=?", arguments: [orphan.id]) } == 0)
+        try FileManager.default.moveItem(at: stored, to: music.appendingPathComponent("Old"))
+        let restored = try await scanner.scan(root: root) { _ in }
+        #expect(restored.reused == tracks.count)
+        #expect(try await db.sections().map(\.relativePath) == ["Old"])
+        #expect(try await db.albums().first?.id == original.id)
+        #expect(try await db.albums().first?.favorite == true)
+        #expect(try await db.tracks(albumID: original.id).map(\.id) == tracks.map(\.id))
+        #expect(try await db.tracks(albumID: original.id).allSatisfy(\.available))
+        // A new folder and music appear on the next scan without touching existing history.
+        try audio(music.appendingPathComponent("Added/New album/1.flac"), number: 1, edition: "new music")
+        _ = try await scanner.scan(root: root) { _ in }
+        #expect(try await db.sections().map(\.relativePath) == ["Added", "Old"])
+        #expect(try await db.albums().count == 2)
+        try await checkIntegrity(db)
+    }
+
+    @Test func folderMigrationRepairsLegacyOverridesWithoutChangingListeningData() async throws {
+        let (dir, db, root, scanner) = try await fixture()
+        let original = try #require(try await db.albums().first)
+        var collection = try #require(try await db.sections().first)
+        collection.name = "Custom alias"; collection.hidden = true; collection.order = 99
+        try await db.saveSection(collection)
+        let wrong = LibrarySection(rootID: root.id, relativePath: "Ghost", name: "Ghost alias")
+        try await db.saveSection(wrong)
+        try await db.editAlbum(original.id, title: "Keep this title", artist: "Keep this artist")
+        try await db.setFavorite(original.id, value: true)
+        let before = try await db.scanTracks(rootID: root.id)
+        let queue = QueueSnapshot(entries: before.values.sorted { $0.id < $1.id }.map { QueueEntry(trackID: $0.id) }, index: 0, position: 7)
+        try await db.setPreference("queue", value: queue)
+        var legacy = try #require(try await db.album(original.id)); legacy.sectionID = wrong.id
+        let legacyJSON = String(decoding: try JSONEncoder().encode(legacy), as: UTF8.self)
+        try await db.pool.write { sql in
+            try sql.execute(sql: "UPDATE album SET sectionID=?,data=? WHERE id=?", arguments: [wrong.id, legacyJSON, original.id])
+            try sql.execute(sql: "UPDATE searchContent SET sectionID=? WHERE albumID=?", arguments: [wrong.id, original.id])
+            try sql.execute(sql: "INSERT INTO assertion(entityID,field,value,source) VALUES(?,'sectionID',?,'user')", arguments: [original.id, wrong.id])
+            try sql.execute(sql: "ALTER TABLE section DROP COLUMN present; DELETE FROM grdb_migrations WHERE identifier='v6-folder-collections'")
+        }
+        let migrated = try LibraryDatabase(path: db.path)
+        let repaired = try #require(try await migrated.album(original.id))
+        #expect(repaired.sectionID == collection.id); #expect(repaired.favorite)
+        #expect(repaired.title == "Keep this title"); #expect(repaired.artist == "Keep this artist")
+        #expect(try await migrated.scanTracks(rootID: root.id) == before)
+        let current = try #require(try await migrated.sections().first { $0.id == collection.id })
+        #expect(current.name == "Old"); #expect(!current.hidden); #expect(current.order == 0)
+        #expect(try await migrated.search("Piece 1", sectionID: current.id).contains { $0.kind == "track" })
+        let savedQueue = try #require(try await migrated.preference("queue", as: QueueSnapshot.self))
+        #expect(savedQueue.entries == queue.entries); #expect(savedQueue.index == queue.index); #expect(savedQueue.position == queue.position)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).contains { $0.contains("before-migration") })
+        // Unchanged files take the reuse path, which must still clean up obsolete collections.
+        let result = try await scanner.scan(root: root) { _ in }
+        #expect(result.reused == 2); #expect(try await migrated.sections().map(\.name) == ["Old"])
+        try await checkIntegrity(migrated)
+    }
+
+    @Test func disconnectedRootPreservesCollections() async throws {
+        let (dir, db, root, scanner) = try await fixture()
+        let sections = try await db.sections(), albums = try await db.albums()
+        try FileManager.default.moveItem(at: URL(fileURLWithPath: root.path), to: dir.appendingPathComponent("disconnected"))
+        await #expect(throws: (any Error).self) { _ = try await scanner.scan(root: root) { _ in } }
+        #expect(try await db.sections() == sections); #expect(try await db.albums() == albums)
+    }
+
     @Test func cancelledScanDefersRelocationUntilComplete() async throws {
         let (_, db, root, scanner) = try await fixture(count: 26)
         let original = try #require(try await db.albums().first), music = URL(fileURLWithPath: root.path)
@@ -182,6 +269,7 @@ import GRDB
         } }
         let cancelled = try await task.value
         #expect(cancelled.cancelled); #expect(!cancelled.finished)
+        #expect(try await db.sections().contains { $0.relativePath == "Old" })
         #expect(try await db.album(original.id)?.folder == original.folder)
         #expect(try await db.tracks(albumID: original.id).allSatisfy(\.available))
         _ = try await scanner.scan(root: root) { _ in }

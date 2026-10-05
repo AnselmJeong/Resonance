@@ -4,6 +4,46 @@ import GRDB
 @testable import ResonanceCore
 
 @Suite struct LibraryMigrationSnapshotTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["RESONANCE_COLLECTION_SNAPSHOT"] != nil))
+    func folderCollectionsOnLibraryCopy() async throws {
+        let sourcePath = try #require(ProcessInfo.processInfo.environment["RESONANCE_COLLECTION_SNAPSHOT"])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ResonanceCollectionSnapshot-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = Configuration(); config.readonly = true
+        let source = try DatabaseQueue(path: sourcePath, configuration: config)
+        let path = directory.appendingPathComponent("Library.sqlite").path, copy = try DatabaseQueue(path: path)
+        try source.backup(to: copy)
+        let before = try await copy.read { sql in
+            (try String.fetchAll(sql, sql: "SELECT data FROM track ORDER BY id"),
+             try String.fetchAll(sql, sql: "SELECT id FROM insight ORDER BY id"),
+             try String.fetchAll(sql, sql: "SELECT id FROM album WHERE favorite=1 ORDER BY id"),
+             try String.fetchOne(sql, sql: "SELECT data FROM preference WHERE key='queue'"),
+             try Int.fetchOne(sql, sql: "SELECT COUNT(*) FROM section")!)
+        }
+        let db = try LibraryDatabase(path: path)
+        #expect(try await copy.read { try String.fetchAll($0, sql: "SELECT data FROM track ORDER BY id") } == before.0)
+        let roots = try await db.roots(), scanner = LibraryScanner(database: db, cache: directory.appendingPathComponent("Artwork"))
+        for root in roots {
+            let result = try await scanner.scan(root: root) { _ in }
+            #expect(result.finished); #expect(!result.cancelled)
+            print("COLLECTION COPY ROOT: \(root.name), \(result.processed) files, \(result.errors.count) errors")
+        }
+        let sections = try await db.sections()
+        for section in sections {
+            let root = try #require(roots.first { $0.id == section.rootID })
+            #expect(FileManager.default.fileExists(atPath: URL(fileURLWithPath: root.path).appendingPathComponent(section.relativePath).path))
+            #expect(section.name == LibrarySection.folderName(rootPath: root.path, relativePath: section.relativePath))
+            #expect(!section.hidden); #expect(section.order == 0)
+        }
+        #expect(try await copy.read { try String.fetchAll($0, sql: "SELECT id FROM insight ORDER BY id") } == before.1)
+        #expect(try await copy.read { try String.fetchAll($0, sql: "SELECT id FROM album WHERE favorite=1 ORDER BY id") } == before.2)
+        #expect(try await copy.read { try String.fetchOne($0, sql: "SELECT data FROM preference WHERE key='queue'") } == before.3)
+        #expect(try await db.integrityCheck() == "ok")
+        #expect(try await copy.read { try Row.fetchAll($0, sql: "PRAGMA foreign_key_check").count } == 0)
+        print("COLLECTION COPY: \(before.4) -> \(sections.count) collections; \(before.0.count) original tracks; favorites, stories and queue preserved")
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["RESONANCE_RELOCATION_SNAPSHOT"] != nil))
     func relocationOnLibraryCopy() async throws {
         let sourcePath = try #require(ProcessInfo.processInfo.environment["RESONANCE_RELOCATION_SNAPSHOT"])

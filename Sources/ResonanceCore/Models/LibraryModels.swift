@@ -5,6 +5,7 @@ public struct LibraryRoot: Codable, Identifiable, Hashable, Sendable {
     public var path: String
     public var bookmark: Data?
     public var volumeID: String?
+    public var smb: SMBSource?
     public var exclusions = ["__backup__", "lost+found", "Covers", "@eaDir", "$RECYCLE.BIN"]
     public var status = "연결됨"
     public var name: String { URL(fileURLWithPath: path).lastPathComponent }
@@ -21,6 +22,13 @@ public struct LibrarySection: Codable, Identifiable, Hashable, Sendable {
     public var order = 0
     public init(rootID: String, relativePath: String, name: String) {
         self.id = TextKey.id(rootID, relativePath); self.rootID = rootID; self.relativePath = relativePath; self.name = name
+    }
+    static func folderPath(for musicPath: String) -> String {
+        let parts = musicPath.split(separator: "/")
+        return parts.count > 1 ? String(parts[0]) : ""
+    }
+    static func folderName(rootPath: String, relativePath: String) -> String {
+        relativePath.isEmpty ? URL(fileURLWithPath: rootPath).lastPathComponent : relativePath
     }
 }
 
@@ -62,11 +70,13 @@ public struct Track: Codable, Identifiable, Hashable, Sendable {
     public var isrc: String
     public var size: Int64
     public var modified: Double
+    public var metadataStatus: String?
     public var available: Bool
     public var tags: [String: [String]]
     public var credits: [Credit]
     public var recordingID: String { "recording:" + id }
     public var sourceFormat: String {
+        if metadataStatus == "deferred-format" { return format + " · 태그 읽기 보류" }
         if sampleRate > 0 { return "\(format) · \(bitDepth > 0 ? "\(bitDepth)-bit / " : "")\(String(format: "%g", Double(sampleRate) / 1000)) kHz" }
         return format
     }
@@ -125,6 +135,9 @@ public struct ScanProgress: Codable, Sendable {
     public var current = ""
     public var finished = false
     public var cancelled = false
+    // Optional fields keep scan history written by older app versions readable.
+    public var issues: [ScanIssue]? = nil
+    public var phase: String? = nil
     public init() {}
 }
 

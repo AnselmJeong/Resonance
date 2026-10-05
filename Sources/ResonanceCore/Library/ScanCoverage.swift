@@ -2,12 +2,13 @@ import Foundation
 
 /// Only a completed traversal can prove absence. Failed or intentionally skipped paths remain unknown.
 struct ScanCoverage: Sendable {
-    var files: Set<String> = []
-    var folders: Set<String> = [""]
-    var protectedPaths: Set<String> = []
+    var files: ExactPathSet = []
+    var folders: ExactPathSet = [""]
+    var collections: ExactPathSet = []
+    var protectedPaths: ExactPathSet = []
 
     func isProtected(_ path: String) -> Bool {
-        protectedPaths.contains { $0.isEmpty || path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
+        protectedPaths.contains { path.isEmpty || $0.isEmpty || Data(path.utf8) == Data($0.utf8) || Data(path.utf8).starts(with: Data(($0 + "/").utf8)) || Data($0.utf8).starts(with: Data((path + "/").utf8)) }
     }
     func isMissing(_ path: String) -> Bool { !files.contains(path) && !isProtected(path) }
     func folderIsMissing(_ path: String) -> Bool { !folders.contains(path) && !isProtected(path) }

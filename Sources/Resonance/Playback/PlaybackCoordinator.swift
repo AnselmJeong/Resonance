@@ -10,6 +10,11 @@ final class PlaybackCoordinator {
     let player = AVQueuePlayer()
     let output = OutputMonitor()
     private let db: LibraryDatabase
+    private let files: AudioFileAccess
+    private var currentFile: AudioFileLease?
+    private var nextFile: AudioFileLease?
+    private var preparationTask: Task<AudioFileLease, Error>?
+    private var prefetchTask: Task<Void, Never>?
     var state = State.idle
     var entries: [QueueEntry] = []
     var index = 0
@@ -38,8 +43,8 @@ final class PlaybackCoordinator {
     private var changingItems = false
     private var tokens: [NSObjectProtocol] = []
 
-    init(database: LibraryDatabase) {
-        db = database; player.volume = Float(volume); player.allowsExternalPlayback = true
+    init(database: LibraryDatabase, files: AudioFileAccess) {
+        db = database; self.files = files; player.volume = Float(volume); player.allowsExternalPlayback = true
         observations.append(player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             Task { @MainActor in
                 guard let self, self.stream == nil, self.current != nil, self.state != .failed else { return }
@@ -79,7 +84,7 @@ final class PlaybackCoordinator {
                 guard let self, let item = notification.object as? AVPlayerItem, let endedID = self.itemEntries[ObjectIdentifier(item)] else { return }
                 if endedID == self.entries.last?.id {
                     self.wantsPlaying = false; self.state = .paused; self.position = self.current?.duration ?? 0; self.persist(); self.updateNowPlaying()
-                } else if self.player.currentItem == nil, self.entries.indices.contains(self.index), endedID == self.entries[self.index].id {
+                } else if (self.player.currentItem == nil || (self.player.currentItem === item && self.player.items().count == 1)), self.entries.indices.contains(self.index), endedID == self.entries[self.index].id {
                     await self.prepare(at: self.index + 1, autoplay: self.wantsPlaying)
                 }
             }
@@ -101,7 +106,7 @@ final class PlaybackCoordinator {
     func selectOutput(_ newTarget: OutputTarget) async {
         guard newTarget != target else { return }
         let resume = wantsPlaying, at = position
-        generation += 1
+        generation += 1; preparationTask?.cancel(); prefetchTask?.cancel(); upcomingGeneration += 1
         player.pause(); player.removeAllItems(); itemEntries.removeAll()
         stream?.stop(); stream = nil; streamEnded = false; error = nil
         target = newTarget; preferredReceiverID = nil
@@ -161,7 +166,7 @@ final class PlaybackCoordinator {
         if entries.isEmpty { entries = added; if !added.isEmpty { await prepare(at: 0, autoplay: false) } }
         else if next { entries.insert(contentsOf: added, at: min(index + 1, entries.count)) }
         else { entries += added }
-        await prepareNext(); persist()
+        scheduleNext(); persist()
     }
     func toggle() {
         if wantsPlaying || state == .playing { pause() }
@@ -196,13 +201,13 @@ final class PlaybackCoordinator {
         entries.remove(at: i)
         if entries.isEmpty { stop(); return }
         if i < index { index -= 1 }
-        if wasCurrent { await prepare(at: min(index, entries.count - 1), autoplay: playing) } else { await prepareNext(); persist() }
+        if wasCurrent { await prepare(at: min(index, entries.count - 1), autoplay: playing) } else { scheduleNext(); persist() }
     }
     func move(_ id: String, delta: Int) async {
         guard let i = entries.firstIndex(where: { $0.id == id }), entries.indices.contains(i + delta) else { return }
         let currentID = entries.indices.contains(index) ? entries[index].id : nil
         entries.swapAt(i, i + delta); if let currentID { index = entries.firstIndex(where: { $0.id == currentID }) ?? index }
-        await prepareNext(); persist()
+        scheduleNext(); persist()
     }
     func removeTracks(_ trackIDs: Set<String>) async {
         let old = QueueSnapshot(entries: entries, index: index, position: position)
@@ -211,10 +216,10 @@ final class PlaybackCoordinator {
         let retainedCurrent = entries.indices.contains(index) && !trackIDs.contains(entries[index].trackID) && current != nil
         entries = updated.entries; index = updated.index
         if entries.isEmpty { stop() }
-        else if retainedCurrent { await prepareNext(); persist() }
+        else if retainedCurrent { scheduleNext(); persist() }
         else { await prepare(at: index, autoplay: false) }
     }
-    func stop() { generation += 1; wantsPlaying = false; player.pause(); stream?.stop(); streamEnded = false; player.removeAllItems(); entries.removeAll(); itemEntries.removeAll(); current = nil; currentAlbum = nil; position = 0; index = 0; state = .idle; persist(); MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
+    func stop() { preparationTask?.cancel(); preparationTask = nil; prefetchTask?.cancel(); prefetchTask = nil; upcomingGeneration += 1; generation += 1; wantsPlaying = false; player.pause(); stream?.stop(); streamEnded = false; player.removeAllItems(); entries.removeAll(); itemEntries.removeAll(); current = nil; currentAlbum = nil; currentFile = nil; nextFile = nil; position = 0; index = 0; state = .idle; persist(); MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
     func persist() {
         let snapshot = QueueSnapshot(entries: entries, index: index, position: position)
         Task { try? await db.setPreference("queue", value: snapshot) }
@@ -229,41 +234,46 @@ final class PlaybackCoordinator {
             let album = try? await db.album(refreshed.albumID)
             if current?.id == refreshed.id { currentAlbum = album }
         }
-        await prepareNext(); persist(); updateNowPlaying()
+        scheduleNext(); persist(); updateNowPlaying()
     }
     private func fail(_ message: String) { player.pause(); stream?.pause(); wantsPlaying = false; state = .failed; error = message; AppLog.playback.error("Playback failed: \(message, privacy: .private)"); persist(); updateNowPlaying() }
-    private func fileURL(_ track: Track) async throws -> URL {
+    private func fileURL(_ track: Track) async throws -> AudioFileLease {
         guard track.supported else { throw AppError.message("\(track.format)은 아직 재생을 지원하지 않습니다.") }
         guard let root = try await db.roots().first(where: { $0.id == track.rootID }) else { throw AppError.message("음원의 라이브러리를 찾을 수 없습니다.") }
+        if root.smb != nil { return try await files.resolve(root: root, track: track) }
         let rootURL = URL(fileURLWithPath: root.path, isDirectory: true)
         let volume = try? rootURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString
         if let expected = root.volumeID, let volume, volume != expected { throw AppError.message("등록한 볼륨과 다른 볼륨입니다.") }
         let url = rootURL.appendingPathComponent(track.relativePath)
-        guard FileManager.default.fileExists(atPath: url.path), FileManager.default.isReadableFile(atPath: url.path) else { throw AppError.message("음원이 연결되어 있지 않습니다. 음악 볼륨을 다시 연결하세요.") }
-        return url
+        return try await files.resolve(url, size: track.size, modified: track.modified)
     }
     private func prepare(at newIndex: Int, autoplay: Bool, position: Double = 0) async {
         guard entries.indices.contains(newIndex) else { return }
+        preparationTask?.cancel(); prefetchTask?.cancel(); upcomingGeneration += 1
         generation += 1; let token = generation; wantsPlaying = autoplay; state = .preparing; error = nil
         player.pause(); index = newIndex; changingItems = true; player.removeAllItems(); itemEntries.removeAll(); itemObservation = nil
         do {
             guard let track = try await db.track(entries[newIndex].trackID) else { throw AppError.message("색인에서 트랙을 찾을 수 없습니다.") }
-            let url = try await fileURL(track), album = try await db.album(track.albumID)
             guard token == generation else { return }
+            let preparation = Task { try await fileURL(track) }; preparationTask = preparation
+            let file = try await preparation.value, album = try await db.album(track.albumID)
+            guard token == generation else { return }
+            preparationTask = nil
+            currentFile = file; nextFile = nil
+            let url = file.url
             current = track; currentAlbum = album; self.position = position
             AppLog.playback.info("Prepared track \(track.id.prefix(12), privacy: .public)")
             if let stream {
                 streamEnded = false
                 stream.load(.init(id: entries[newIndex].id, url: url), at: position, autoplay: wantsPlaying)
                 changingItems = false
-                await prepareNext()
+                scheduleNext()
                 guard token == generation else { return }
                 if !wantsPlaying { state = .paused }
                 persist(); updateNowPlaying(); return
             }
-            let item = AVPlayerItem(url: url); itemEntries[ObjectIdentifier(item)] = entries[newIndex].id
+            let item = playerItem(file: url, track: track); itemEntries[ObjectIdentifier(item)] = entries[newIndex].id
             player.insert(item, after: nil); observeItem(item); changingItems = false
-            await prepareNext()
             guard token == generation else { return }
             if position > 0 {
                 seekGeneration += 1
@@ -271,27 +281,45 @@ final class PlaybackCoordinator {
             }
             guard token == generation else { return }
             if wantsPlaying { player.play() } else { state = .paused }
+            scheduleNext()
             persist(); updateNowPlaying()
         } catch { guard token == generation else { return }; changingItems = false; fail(error.localizedDescription) }
     }
-    private func prepareNext() async {
-        upcomingGeneration += 1; let upcomingToken = upcomingGeneration, token = generation
+    private func scheduleNext() {
+        prefetchTask?.cancel(); upcomingGeneration += 1
+        let upcomingToken = upcomingGeneration, token = generation
+        prefetchTask = Task { [weak self] in await self?.prepareNext(token: token, upcomingToken: upcomingToken) }
+    }
+    private func prepareNext(token: Int, upcomingToken: Int) async {
+        guard !Task.isCancelled, token == generation, upcomingToken == upcomingGeneration else { return }
+        nextFile = nil
         if let stream {
             stream.setNext(nil)
             guard entries.indices.contains(index + 1) else { return }
             let entry = entries[index + 1]
-            guard let track = try? await db.track(entry.trackID), let url = try? await fileURL(track), token == generation, upcomingToken == upcomingGeneration,
+            guard let track = try? await db.track(entry.trackID), let file = try? await fileURL(track), !Task.isCancelled, token == generation, upcomingToken == upcomingGeneration,
                   stream === self.stream, entries.indices.contains(index + 1), entries[index + 1].id == entry.id else { return }
-            stream.setNext(.init(id: entry.id, url: url))
+            nextFile = file
+            stream.setNext(.init(id: entry.id, url: file.url))
             return
         }
         guard let currentItem = player.currentItem else { return }
         for item in player.items() where item !== currentItem { player.remove(item); itemEntries.removeValue(forKey: ObjectIdentifier(item)) }
         guard entries.indices.contains(index + 1) else { return }
         let entry = entries[index + 1]
-        guard let track = try? await db.track(entry.trackID), let url = try? await fileURL(track), token == generation, upcomingToken == upcomingGeneration, player.currentItem === currentItem, entries.indices.contains(index + 1), entries[index + 1].id == entry.id else { return }
-        let item = AVPlayerItem(url: url); itemEntries[ObjectIdentifier(item)] = entry.id
+        guard let track = try? await db.track(entry.trackID), let file = try? await fileURL(track), !Task.isCancelled, token == generation, upcomingToken == upcomingGeneration, player.currentItem === currentItem, entries.indices.contains(index + 1), entries[index + 1].id == entry.id else { return }
+        nextFile = file
+        let item = playerItem(file: file.url, track: track); itemEntries[ObjectIdentifier(item)] = entry.id
         if player.canInsert(item, after: currentItem) { player.insert(item, after: currentItem) }
+    }
+    private func playerItem(file: URL, track: Track) -> AVPlayerItem {
+        let item = AVPlayerItem(url: file)
+        // Native FLAC playback can run beyond EOF after seeking without posting an end event.
+        // STREAMINFO's sample count gives the exact boundary for queue advancement.
+        if track.format == "FLAC", track.duration.isFinite, track.duration > 0, track.sampleRate > 0 {
+            item.forwardPlaybackEndTime = CMTime(seconds: track.duration, preferredTimescale: Int32(track.sampleRate))
+        }
+        return item
     }
     private func itemChanged(_ identity: ObjectIdentifier?) async {
         guard !changingItems, let identity, let id = itemEntries[identity] else { return }
@@ -301,6 +329,7 @@ final class PlaybackCoordinator {
     private func advance(to id: String) async {
         guard let newIndex = entries.firstIndex(where: { $0.id == id }), newIndex != index else { return }
         generation += 1; let token = generation; index = newIndex; position = 0
+        currentFile = nextFile; nextFile = nil
         do {
             let track = try await db.track(entries[index].trackID)
             let album: Album?
@@ -308,7 +337,7 @@ final class PlaybackCoordinator {
             guard token == generation else { return }
             current = track; currentAlbum = album
             if stream == nil, let item = player.currentItem { observeItem(item) }
-            await prepareNext(); persist(); updateNowPlaying()
+            scheduleNext(); persist(); updateNowPlaying()
         } catch { fail(error.localizedDescription) }
     }
     private func observeItem(_ item: AVPlayerItem) {

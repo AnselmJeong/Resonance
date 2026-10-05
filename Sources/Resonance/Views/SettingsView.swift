@@ -17,13 +17,15 @@ struct SettingsView: View {
     @State private var savingKey = false
     var body: some View {
         VStack(spacing: 0) {
-            Picker("설정", selection: $tab) { Text("라이브러리").tag("library"); Text("음악 정보").tag("info"); Text("운영과 백업").tag("operations") }.pickerStyle(.segmented).padding(20)
+            Picker("설정", selection: $tab) { Text("라이브러리").tag("library"); Text("통계").tag("statistics"); Text("음악 정보").tag("info"); Text("운영과 백업").tag("operations") }.pickerStyle(.segmented).padding(20)
             Form {
                 if tab == "library" { librarySettings }
+                if tab == "statistics" { LibraryStatisticsView(model: model) }
                 if tab == "info" { infoSettings }
                 if tab == "operations" { operationsSettings }
             }.formStyle(.grouped)
             HStack {
+                ScanStatusView(model: model).frame(maxWidth: 180, alignment: .leading)
                 if let message { Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
                 Spacer()
                 Button(saving ? "저장 중…" : "설정 저장") { saveAndClose() }
@@ -40,7 +42,7 @@ struct SettingsView: View {
             ForEach(model.roots) { root in RootSettingsRow(model: model, root: root) }
             HStack { Button("음악 폴더 추가…") { model.chooseRoot() }.disabled(model.removingRootID != nil); Spacer(); Button(model.scanning ? "스캔 중지" : "재스캔") { if model.scanning { model.cancelScan() } else { model.startScan() } }.disabled(model.roots.isEmpty || model.removingRootID != nil) }
         }
-        if !model.sections.isEmpty { Section("컬렉션 이름 · 순서 · 표시") { ForEach(model.sections) { SectionSettingsRow(model: model, section: $0) } } }
+        SMBFallbackSettingsView(model: model)
         Section("출력") {
             Text("재생 바의 AirPlay 선택기는 앱의 AVQueuePlayer에 연결됩니다.").font(.callout)
             Text("음악은 앱의 AirPlay 선택기에서 연결합니다. Mac의 일반 소리와 알림은 macOS에서 별도로 관리하세요. 원본 음원 형식과 전송 형식은 다를 수 있습니다.").font(.caption).foregroundStyle(.secondary)
@@ -161,17 +163,5 @@ struct RootSettingsRow: View {
             } message: {
                 Text("\(root.path)\n\n이 폴더의 앨범·트랙 색인, 앨범 수정 정보와 저장된 설명을 앱에서 제거합니다. 원본 음원은 삭제하지 않습니다. 다시 연결하면 재스캔할 수 있습니다.")
             }
-    }
-}
-
-struct SectionSettingsRow: View {
-    let model: AppModel
-    let section: LibrarySection
-    @State private var name = ""
-    @State private var order = 0
-    @State private var visible = true
-    var body: some View {
-        HStack { Toggle("표시", isOn: $visible).labelsHidden(); TextField("컬렉션 이름", text: $name); Stepper("\(order)", value: $order, in: 0...100).frame(width: 85); Button("적용") { var updated = section; updated.name = name; updated.order = order; updated.hidden = !visible; Task { await model.saveSection(updated) } }.disabled(name.isEmpty) }
-            .onAppear { name = section.name; order = section.order; visible = !section.hidden }
     }
 }

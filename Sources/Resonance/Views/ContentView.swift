@@ -68,10 +68,10 @@ struct SidebarView: View {
                 }
                 if !model.roots.isEmpty {
                     Section("음악 폴더") {
-                        ForEach(model.roots) { root in
-                            Label(root.name, systemImage: root.status == "연결됨" ? "folder" : "externaldrive.badge.exclamationmark")
-                                .tag(root.navigationID)
-                                .help(root.path + " · " + root.status)
+                        ForEach(model.rootGroups) { root in
+                            Label(root.name, systemImage: root.connected ? "folder" : "externaldrive.badge.exclamationmark")
+                                .tag(root.id)
+                                .help(root.help)
                         }
                     }
                 }
@@ -84,12 +84,12 @@ struct SidebarView: View {
             .onChange(of: model.selection) { _, value in model.selectSection(value) }
             Divider()
             VStack(alignment: .leading, spacing: 9) {
-                if model.scanning {
-                    HStack { ProgressView().controlSize(.small); Text("\(model.scan?.processed ?? 0)곡 처리").font(.caption); Spacer(); Button("중지") { model.cancelScan() }.buttonStyle(.borderless).font(.caption) }
-                    Text(model.scan?.current ?? "음악을 찾고 있습니다").font(.caption2).lineLimit(1).foregroundStyle(.secondary)
-                } else { Text("\(model.counts.albums.formatted()) 앨범 · \(model.counts.tracks.formatted()) 트랙").font(.caption).foregroundStyle(.secondary) }
+                Text("\(model.counts.albums.formatted()) 앨범 · \(model.counts.tracks.formatted()) 트랙").font(.caption).foregroundStyle(.secondary)
+                ScanStatusView(model: model)
                 if !model.connected { Label("음악 볼륨을 다시 연결하세요", systemImage: "externaldrive.badge.exclamationmark").font(.caption).foregroundStyle(.orange) }
-                HStack { Button { model.startScan() } label: { Label("재스캔", systemImage: "arrow.clockwise") }.disabled(model.scanning || model.roots.isEmpty); Spacer() }.buttonStyle(.borderless).font(.caption)
+                if !model.scanning {
+                    HStack { Button { model.startScan() } label: { Label("재스캔", systemImage: "arrow.clockwise") }.disabled(model.roots.isEmpty); Spacer() }.buttonStyle(.borderless).font(.caption)
+                }
             }.padding(16)
         }
     }

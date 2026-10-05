@@ -173,3 +173,27 @@
 - 빌드: `./script/build_and_run.sh --build`, `--verify` 성공. `~/Applications/Resonance.app`과 생성 번들의 바이너리 SHA-256 일치, v5 마이그레이션 적용 확인. 로컬 ad-hoc 서명이며 Developer ID/notarization 검증은 이 작업의 범위가 아니다.
 - 설치본: 최종 바이너리 SHA-256 `c4b57a24345da18791ecda93e7811b040b57cfdd65f3c611a1e37ce6eb0f391e`. 실제 UI에서 전체 재스캔 실행. Contemporary 07:57:00, Artist 07:57:29 완료(KST); Composer는 후속 스캔 진행 중이다. Bach 25곡, Four Hands 22곡, Pianosong 30곡, Satie: Discoveries 29곡이 각각 한 앨범으로 표시되는 것을 UI와 DB 양쪽에서 확인했다. 이전 경로 0건, 기존 트랙 ID 106개·태그·크기 보존, 저장된 설명 ID 전부 보존, 실제 DB `integrity_check=ok`, 외래키 위반 0건.
 - 실데이터 병합 전 백업: `~/Library/Application Support/Resonance/Library.sqlite.before-relocation-1791067900-C0D4D46D.sqlite`. 최종 표시 보완 후 이동 관련 회귀 검사 5개 재통과. 연결된 서로 다른 크레디트 ID는 보존하면서 검색 설명의 반복 이름을 제거했으며 설치 UI에서도 확인했다.
+
+
+# 폴더 기준 컬렉션과 설정 응답 수정 (2026-10-04)
+
+- 원인: 스캐너가 컬렉션을 추가만 하고 완료 시 부재를 반영하지 않았다. 설정은 529개 컬렉션에 각각 Toggle·TextField·Stepper·버튼을 생성했다. 앨범 편집의 sectionID 사용자 assertion도 폴더 이동 후 이전 컬렉션을 유지할 수 있었다.
+- 변경: 설정의 컬렉션 편집 목록과 앨범의 수동 컬렉션 선택을 제거했다. 이름·자연 정렬·소속은 실제 음악 경로를 따른다. v6 마이그레이션이 기존 별칭·숨김·순서·소속을 폴더 기준으로 복원하고 앨범 및 검색 색인의 소속을 일치시킨다.
+- 완료된 스캔의 관찰 컬렉션과 보호 경로를 이용해 존재 상태를 갱신한다. 참조 없는 유령 행은 삭제하고, 기록이 연결된 행은 비활성화하여 원래 경로 복원 시 ID·즐겨찾기·설명을 회복한다. 읽기 실패·제외·symlink·연결 해제·취소로는 기존 컬렉션을 제거하지 않는다.
+- 스캔 중 추가 요청은 한 번의 후속 스캔으로 합쳐 처리한다. 앱 시작 시 변경을 확인하며, 선택 중이던 컬렉션이 사라지면 상위 음악 폴더로 이동한다.
+- 회귀 검사: 이름 변경·이동·삭제·복원·새 음악 추가, 재사용 경로, 기존 수동 설정 마이그레이션, 검색 소속, 기록·큐 보존, 연결 해제·오류·취소. `RESONANCE_COLLECTION_SNAPSHOT="$HOME/Library/Application Support/Resonance/Library.sqlite" ./script/test.sh` 전체 실행 성공(55개 테스트 정의, 선택적 벤치마크·실제 LLM·이전 상태 전용 snapshot 검사는 비활성화). 실제 사본 검사 99.7초, 컬렉션 529 → 527개, 즐겨찾기·설명·큐 보존 및 SQLite 무결성 정상.
+- 격리된 GUI 검증: 테스트 폴더 Before → After 이름 변경, Added 추가 및 기존 폴더 제거를 FSEvents가 감지했다. 수동 재스캔 없이 사이드바 갱신, 사라진 선택의 상위 폴더 복귀, 설정 목록 제거를 확인했다. 테스트 전용 음악만 변경했다.
+- 설치본: `./script/build_and_run.sh --build`, `--verify` 성공. `~/Applications/Resonance.app`과 빌드본 실행 파일 SHA-256 `6bbccd77e00d31ed86365594cb4e0f1ed6cb7924a7e445b4f15582d0f45c6d98` 일치, ad-hoc 서명 무결성 확인. 실행 중 재스캔 상태에서도 설정 클릭부터 접근성 트리 확인까지 648ms였다(정식 성능 벤치마크는 아님).
+- 실제 라이브러리: v6 적용 및 세 루트 스캔 완료. 컬렉션 527개, 사라진 Alexander Tharaud 행 0개. 실제 Alexandre Tharaud에는 Bach·Four Hands·Mémoire·Pianosong·Satie: Discoveries 5개 앨범이 표시된다. 전체 1,810개 앨범·27,811개 트랙·16개 설명의 기존 ID 누락 0건, 즐겨찾기 손실 0건, 큐 항목 보존, integrity_check=ok, 외래키 위반 0건. 파일별 오류·미지원 형식 진단 107건은 별도로 남아 있으며 컬렉션 정리를 막지 않는다.
+- 설치 적용 전 재생을 잠시 멈춰 위치를 저장했고, 재실행 뒤 같은 곡 79.68초·X100 출력·음량 1로 복원했다. UI에서 재생 위치 증가와 다음 곡 진행을 확인했다. 물리적 소리의 청취 검사는 수행하지 않았다.
+- 자동 마이그레이션 백업: `~/Library/Application Support/Resonance/Library.sqlite.before-migration-1791090794.sqlite`. 원본 음원은 수정하지 않았으며 커밋·푸시는 하지 않았다.
+
+# 동일 이름 폴더 통합·스캔 알림·통계 (2026-10-05)
+
+- 표시 그룹만 통합한다. 서로 다른 디스크의 같은 루트 이름은 Unicode NFC와 대소문자를 정규화해 한 항목으로 보이며, 경로·루트 ID·스캔 기록은 유지한다. 하위 컬렉션도 같은 표시 그룹 안에서 통합한다. 앨범 페이지·정렬·검색·음악가의 컬렉션 필터가 복수 원본 ID를 함께 조회한다.
+- 스캔 시작부터 하단에 현재 경로, 폴더 순서, 전체 처리 곡 수, 움직이는 진행 막대와 중지 버튼을 표시한다. 전체 파일 수를 미리 알 수 없어 백분율을 표시하지 않는다. 완료·취소·오류는 모달 대신 인라인 메시지로 알리며, 성공 메시지는 15초 후 사라진다. 스캔 중 목록 갱신은 약 1초 간격이며 이미 불러온 앨범 페이지 수를 보존한다.
+- 설정 → 통계: 현재 표시되는 라이브러리의 전체·루트 그룹별·물리 경로별 앨범/곡 수, 최신 스캔 실패 목록과 CSV 내보내기. 비활성 컬렉션은 집계에서 제외하고, 연결 해제된 볼륨의 보존 색인은 포함한다. 취소/부분 실패만으로 이전 실패 목록을 비우지 않으며 완료된 재스캔 후 해결된 항목을 제거한다. CSV는 UTF-8 BOM, RFC 4180 인용, 수식 실행 방지를 적용한다.
+- `./script/test.sh`: 60개 테스트 정의, 11개 suite 실패 없음. 선택적 벤치마크·실제 LLM·snapshot 3개는 비활성화, 배포되지 않은 로컬 음악 fixture 검사는 생략했다. 신규 검사에서 복수 루트 페이지/검색/집계, Unicode 그룹 ID, 루트 제거, 취소 후 오류 보존, 손상 FLAC·재사용되는 미지원 형식, 수정 후 오류 해소, 예전 스캔 JSON 호환과 CSV 인용을 확인했다.
+- 격리 GUI: 같은 Artist 이름의 2개 경로가 단일 항목으로 표시되고 양쪽 앨범 2개가 나타났다. 전체 3앨범/9곡, Artist 2앨범/6곡, Composer 1앨범/3곡 및 오류 1건을 UI로 확인했다. 실제 CSV 저장 후 Python csv.reader로 한글·쉼표·따옴표를 포함한 경로와 오류 메시지가 보존된 것을 검증했다.
+- 설치 GUI: 기존 5개 연결 경로가 Contemporary/Artist/Composer 3개 항목으로 표시됨을 확인했다. 스캔 중 Artist 선택 및 설정 → 통계 이동이 가능했고, 하단 진행 막대와 처리 곡 수가 갱신됐다. 이 기록 시점에는 실제 전체 재스캔이 진행 중이므로 최종 집계/실패 건수의 확정 결과는 아니다.
+- `./script/build_and_run.sh --build` 및 설치본 ad-hoc 서명 검증 통과. 빌드본과 `~/Applications/Resonance.app`의 SHA-256: `dc7732cb1307ffb278feaf33732fccb7a9abb0ccaf61b19ecd6b0dbe9c3a373e`. 기존 스캔을 정상 취소한 뒤 앱을 종료해 교체했다. 설치 전 SQLite backup API 사본: `~/Library/Application Support/Resonance/Backups/before-folder-groups-20261005-081847.sqlite`. 원본 음원은 변경하지 않았다. 커밋·푸시는 하지 않았다.

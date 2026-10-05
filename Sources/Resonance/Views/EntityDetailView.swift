@@ -30,7 +30,7 @@ struct EntityDetailView: View {
     }
     private var filtered: [Track] {
         tracks.filter { track in
-            (!state.collectionOnly || model.sectionID == nil || albums[track.albumID]?.sectionID == model.sectionID)
+            (!state.collectionOnly || model.sectionIDs == nil || model.sectionIDs?.contains(albums[track.albumID]?.sectionID ?? "") == true)
             && (state.role == "all" || track.credits.contains { $0.artistID == subjectID && $0.role == state.role })
             && (state.instrument == "all" || track.credits.contains { $0.artistID == subjectID && ($0.attributes ?? []).contains(state.instrument) })
             && (state.collaborator == "all" || track.credits.contains { $0.artistID == state.collaborator })
@@ -102,7 +102,7 @@ struct EntityDetailView: View {
             HStack {
                 Text(kind == "artist" ? "참여 음반 둘러보기" : "같은 작품, 다른 연주").font(.title3.weight(.semibold))
                 Spacer()
-                Toggle("현재 컬렉션만", isOn: binding(\.collectionOnly)).disabled(model.sectionID == nil).toggleStyle(.checkbox).font(.caption)
+                Toggle("현재 컬렉션만", isOn: binding(\.collectionOnly)).disabled(model.sectionIDs == nil).toggleStyle(.checkbox).font(.caption)
             }
             HStack {
                 if kind == "artist" {

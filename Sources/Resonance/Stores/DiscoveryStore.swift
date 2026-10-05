@@ -44,6 +44,18 @@ struct DetailState {
 }
 extension AppModel {
     func refreshBooklets(_ album: Album) async -> Album {
+        if let source = roots.first(where: { $0.id == album.rootID })?.smb {
+            guard album.artwork.map({ FileManager.default.fileExists(atPath: $0) }) != true else { return album }
+            do {
+                let tracks = try await db.tracks(albumID: album.id)
+                guard let track = tracks.first else { return album }
+                let transport = try await smbSessions.session(source)
+                if let path = try await SMBArtwork.load(source: source, track: track, transport: transport, cache: AppPaths.cache) {
+                    return try await db.saveSourceArtwork(albumID: album.id, path: path)
+                }
+            } catch { /* A missing cover never prevents album browsing or playback. */ }
+            return album
+        }
         let paths = await booklets.attachments(for: album)
         return (try? await db.updateAttachments(albumID: album.id, paths: paths)) ?? album
     }

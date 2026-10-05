@@ -6,8 +6,22 @@ extension LibraryDatabase {
         try pool.read { db in try String.fetchOne(db, sql: "SELECT targetID FROM libraryRedirect WHERE originalID=?", arguments: [id]) ?? id }
     }
 
-    func scanTracks(rootID: String) throws -> [String: Track] {
-        Dictionary(uniqueKeysWithValues: try list(Track.self, sql: "SELECT data FROM track WHERE rootID=?", args: [rootID]).map { ($0.relativePath, $0) })
+    func scanTracks(rootID: String) throws -> [Data: Track] {
+        Dictionary(uniqueKeysWithValues: try list(Track.self, sql: "SELECT data FROM track WHERE rootID=?", args: [rootID]).map { (Data($0.relativePath.utf8), $0) })
+    }
+
+    /// Keep mounted-library identities when an unambiguous server listing proves the exact spelling.
+    func adoptSMBPath(track original: Track, path: String, folder: String, sectionID: String, groupingKey: String) throws -> Track {
+        var track = original; track.relativePath = path
+        try pool.write { db in
+            try db.execute(sql: "UPDATE track SET path=?,data=? WHERE id=?", arguments: [path, try json(track), track.id])
+            if let data = try String.fetchOne(db, sql: "SELECT data FROM album WHERE id=?", arguments: [track.albumID]) {
+                var album = try decode(Album.self, data); album.folder = folder; album.sectionID = sectionID
+                try db.execute(sql: "UPDATE album SET groupingKey=?,sectionID=?,data=? WHERE id=?", arguments: [groupingKey, sectionID, try json(album), album.id])
+                try db.execute(sql: "UPDATE searchContent SET sectionID=? WHERE albumID=?", arguments: [sectionID, album.id])
+            }
+        }
+        return track
     }
 
     /// Called only after traversal finishes and the root/volume is still connected.
@@ -61,6 +75,17 @@ extension LibraryDatabase {
                 track.available = false
                 try db.execute(sql: "UPDATE track SET available=0,data=? WHERE id=?", arguments: [try json(track), track.id])
             }
+            try FolderCollections.reconcileMembership(db, rootID: root.id)
+            for data in try String.fetchAll(db, sql: "SELECT data FROM section WHERE rootID=?", arguments: [root.id]) {
+                let section = try decode(LibrarySection.self, data)
+                if coverage.collections.contains(section.relativePath) {
+                    try db.execute(sql: "UPDATE section SET present=1 WHERE id=?", arguments: [section.id])
+                } else if !coverage.isProtected(section.relativePath) {
+                    // Keep referenced rows as history so a restored folder recovers the same IDs and notes.
+                    try db.execute(sql: "UPDATE section SET present=0 WHERE id=?", arguments: [section.id])
+                    try db.execute(sql: "DELETE FROM section WHERE id=? AND NOT EXISTS (SELECT 1 FROM album WHERE sectionID=?)", arguments: [section.id, section.id])
+                }
+            }
         }
     }
 
@@ -103,7 +128,7 @@ extension LibraryDatabase {
             try removeSearchEntity(db, id: incoming.id)
             try db.execute(sql: "DELETE FROM track WHERE id=?", arguments: [incoming.id])
             var track = original
-            track.relativePath = incoming.relativePath; track.modified = incoming.modified; track.available = true
+            track.relativePath = incoming.relativePath; track.modified = incoming.modified; track.available = true; track.metadataStatus = incoming.metadataStatus
             track.credits = Array(Set(original.credits + incoming.credits)).sorted { ($0.role, $0.name, $0.artistID) < ($1.role, $1.name, $1.artistID) }
             try db.execute(sql: "UPDATE track SET path=?,scanID=?,available=1,data=? WHERE id=?", arguments: [track.relativePath, scanID, try json(track), track.id])
             relocated.append(track)
@@ -116,7 +141,6 @@ extension LibraryDatabase {
             switch field {
             case "title": album.title = value
             case "artist": album.artist = value
-            case "sectionID": album.sectionID = value
             case "artwork":
                 let relocatedPath = value.hasPrefix(old.folder + "/") ? new.folder + value.dropFirst(old.folder.count) : value
                 album.artwork = relocatedPath

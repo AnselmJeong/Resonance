@@ -54,6 +54,18 @@ public actor LibraryDatabase {
         migrator.registerMigration("v5-library-relocation") { db in
             try db.execute(sql: "CREATE TABLE libraryRedirect(originalID TEXT PRIMARY KEY, targetID TEXT NOT NULL, rootID TEXT NOT NULL REFERENCES root(id))")
         }
+        migrator.registerMigration("v6-folder-collections") { db in try FolderCollections.migrate(db) }
+        migrator.registerMigration("v7-direct-smb") { db in
+            try db.execute(sql: "CREATE TABLE smbReadMetric(rootID TEXT NOT NULL REFERENCES root(id) ON DELETE CASCADE,path TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(rootID,path))")
+        }
+        migrator.registerMigration("v8-search-document-index") { db in
+            // Updating one track must not scan every trigram in a large music library.
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS searchGram_docID ON searchGram(docID)")
+        }
+        migrator.registerMigration("v9-search-album-index") { db in
+            // Folder reconciliation updates search rows per album; avoid a full-table walk for every album.
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS searchContent_albumID ON searchContent(albumID)")
+        }
         if hadDatabase, try !pool.read({ try migrator.hasCompletedMigrations($0) }) {
             let backupPath = path + ".before-migration-\(Int(Date().timeIntervalSince1970)).sqlite"
             try pool.backup(to: DatabaseQueue(path: backupPath))
@@ -124,21 +136,24 @@ public actor LibraryDatabase {
             return removedTracks
         }
     }
-    public func sections() throws -> [LibrarySection] { try list(LibrarySection.self, sql: "SELECT data FROM section").sorted { ($0.order, $0.name) < ($1.order, $1.name) } }
+    public func sections() throws -> [LibrarySection] { try list(LibrarySection.self, sql: "SELECT data FROM section WHERE present=1").sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending } }
     public func saveSection(_ value: LibrarySection) throws {
-        try pool.write { db in try db.execute(sql: "INSERT INTO section(id,rootID,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", arguments: [value.id, value.rootID, try json(value)]) }
+        try pool.write { db in try db.execute(sql: "INSERT INTO section(id,rootID,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,present=1", arguments: [value.id, value.rootID, try json(value)]) }
     }
-    public func albums(rootID: String? = nil, sectionID: String? = nil, favorites: Bool = false, sort: String = "title", limit: Int = 120, offset: Int = 0) throws -> [Album] {
+    public func albums(rootID: String? = nil, sectionID: String? = nil, rootIDs: [String]? = nil, sectionIDs: [String]? = nil, favorites: Bool = false, sort: String = "title", limit: Int = 120, offset: Int = 0) throws -> [Album] {
         let ordering = ["title": "title COLLATE NOCASE", "artist": "artist COLLATE NOCASE,title", "date": "date DESC,title"][sort] ?? "title"
         var conditions: [String] = []; var args: [DatabaseValue] = []
-        if let rootID { conditions.append("rootID=?"); args.append(rootID.databaseValue) }
-        if let sectionID { conditions.append("sectionID=?"); args.append(sectionID.databaseValue) }
+        for (column, ids) in [("rootID", rootID.map { [$0] } ?? rootIDs), ("sectionID", sectionID.map { [$0] } ?? sectionIDs)] {
+            if let ids {
+                guard !ids.isEmpty else { return [] }
+                conditions.append("\(column) IN (\(Array(repeating: "?", count: ids.count).joined(separator: ",")))")
+                args += ids.map(\.databaseValue)
+            }
+        }
         if favorites { conditions.append("favorite=1") }
-        let visible = try sections().filter { !$0.hidden }.map(\.id)
-        if visible.isEmpty { return [] }
-        conditions.append("sectionID IN (\(Array(repeating: "?", count: visible.count).joined(separator: ",")))"); args += visible.map(\.databaseValue)
+        conditions.append("EXISTS (SELECT 1 FROM section s WHERE s.id=album.sectionID AND s.present=1)")
         args += [limit.databaseValue, offset.databaseValue]
-        return try list(Album.self, sql: "SELECT data FROM album WHERE \(conditions.joined(separator: " AND ")) ORDER BY \(ordering) LIMIT ? OFFSET ?", args: StatementArguments(args))
+        return try list(Album.self, sql: "SELECT data FROM album WHERE \(conditions.joined(separator: " AND ")) ORDER BY \(ordering),id LIMIT ? OFFSET ?", args: StatementArguments(args))
     }
     public func counts() throws -> (albums: Int, tracks: Int) {
         try pool.read { db in (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM album") ?? 0, try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM track") ?? 0) }
@@ -172,7 +187,7 @@ public actor LibraryDatabase {
             let overrides = try Row.fetchAll(db, sql: "SELECT field,value FROM assertion WHERE entityID=? AND (source='user' OR (source='musicbrainz' AND field='artwork')) ORDER BY CASE source WHEN 'user' THEN 1 ELSE 0 END", arguments: [album.id])
             for row in overrides {
                 let field: String = row["field"], value: String = row["value"]
-                if field == "title" { album.title = value }; if field == "artist" { album.artist = value }; if field == "artwork" { album.artwork = value }; if field == "sectionID" { album.sectionID = value }
+                if field == "title" { album.title = value }; if field == "artist" { album.artist = value }; if field == "artwork" { album.artwork = value }
             }
             try db.execute(sql: "INSERT INTO album(id,rootID,sectionID,title,artist,date,favorite,data) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sectionID=excluded.sectionID,title=excluded.title,artist=excluded.artist,date=excluded.date,favorite=excluded.favorite,data=excluded.data", arguments: [album.id, album.rootID, album.sectionID, album.title, album.artist, album.date, album.favorite, try json(album)])
             if let groupingKey { try db.execute(sql: "UPDATE album SET groupingKey=? WHERE id=?", arguments: [groupingKey, album.id]) }
@@ -227,7 +242,7 @@ public actor LibraryDatabase {
         for gram in TextKey.grams(title + " " + subtitle) { try db.execute(sql: "INSERT INTO searchGram(gram,docID) VALUES(?,?)", arguments: [gram, docID]) }
     }
 
-    public func search(_ text: String, rootID: String? = nil, sectionID: String? = nil, role: String? = nil, format: String? = nil, limit: Int = 80) throws -> [SearchHit] {
+    public func search(_ text: String, rootID: String? = nil, sectionID: String? = nil, rootIDs: [String]? = nil, sectionIDs: [String]? = nil, role: String? = nil, format: String? = nil, limit: Int = 80) throws -> [SearchHit] {
         let normalized = TextKey.normalize(text), grams = TextKey.queryGrams(text)
         guard !grams.isEmpty else { return [] }
         return try pool.read { db in
@@ -236,17 +251,17 @@ public actor LibraryDatabase {
             var sql = "SELECT c.* FROM searchContent c WHERE (c.id IN (SELECT rowid FROM searchFTS WHERE searchFTS MATCH ?) OR (c.id IN (SELECT docID FROM searchGram WHERE gram=?) AND instr(c.normalized,?)>0))"
             var args: [DatabaseValue] = [TextKey.fts(text).databaseValue, anchor.databaseValue, normalized.databaseValue]
             sql += " AND (c.kind<>'artist' OR EXISTS(SELECT 1 FROM credit WHERE artistID=c.entityID)) AND (c.kind<>'work' OR EXISTS(SELECT 1 FROM recordingWork WHERE workID=c.entityID))"
-            if let rootID {
-                sql += """
-                 AND ((c.kind IN ('album','track') AND EXISTS(SELECT 1 FROM album a WHERE a.id=c.albumID AND a.rootID=?))
-                   OR (c.kind='artist' AND EXISTS(SELECT 1 FROM credit cr JOIN track t ON t.id=cr.trackID WHERE cr.artistID=c.entityID AND t.rootID=?))
-                   OR (c.kind='work' AND EXISTS(SELECT 1 FROM recordingWork rw JOIN recording r ON r.id=rw.recordingID JOIN track t ON t.id=r.trackID WHERE rw.workID=c.entityID AND t.rootID=?)))
-                """
-                args += Array(repeating: rootID.databaseValue, count: 3)
-            }
-            if let sectionID {
-                sql += " AND (c.sectionID=? OR (c.kind='artist' AND EXISTS(SELECT 1 FROM credit cr JOIN track t ON t.id=cr.trackID JOIN album a ON a.id=t.albumID WHERE cr.artistID=c.entityID AND a.sectionID=?)))"
-                args += [sectionID.databaseValue, sectionID.databaseValue]
+            for (column, ids) in [("rootID", rootID.map { [$0] } ?? rootIDs), ("sectionID", sectionID.map { [$0] } ?? sectionIDs)] {
+                if let ids {
+                    guard !ids.isEmpty else { return [] }
+                    let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                    sql += """
+                     AND ((c.kind IN ('album','track') AND EXISTS(SELECT 1 FROM album a WHERE a.id=c.albumID AND a.\(column) IN (\(placeholders))))
+                       OR (c.kind='artist' AND EXISTS(SELECT 1 FROM credit cr JOIN track t ON t.id=cr.trackID JOIN album a ON a.id=t.albumID WHERE cr.artistID=c.entityID AND a.\(column) IN (\(placeholders))))
+                       OR (c.kind='work' AND EXISTS(SELECT 1 FROM recordingWork rw JOIN recording r ON r.id=rw.recordingID JOIN track t ON t.id=r.trackID JOIN album a ON a.id=t.albumID WHERE rw.workID=c.entityID AND a.\(column) IN (\(placeholders)))))
+                    """
+                    for _ in 0..<3 { args += ids.map(\.databaseValue) }
+                }
             }
             if let format { sql += " AND c.format=?"; args.append(format.databaseValue) }
             if let role { sql += " AND (c.role=? OR EXISTS (SELECT 1 FROM credit cr WHERE cr.role=? AND (cr.trackID=c.entityID OR cr.artistID=c.entityID)))"; args += [role.databaseValue, role.databaseValue] }
@@ -265,8 +280,12 @@ public actor LibraryDatabase {
             }
         }
     }
-    public func markSeen(trackID: String, scanID: String) throws {
+    public func markSeen(trackID: String, scanID: String, remoteModified: Double? = nil) throws {
         guard var track = try rawTrack(trackID) else { return }; track.available = true
+        if let remoteModified {
+            track.modified = remoteModified
+            if track.metadataStatus == nil { track.metadataStatus = track.format == "FLAC" ? "inherited-local" : "deferred-format" }
+        }
         try pool.write { db in try db.execute(sql: "UPDATE track SET scanID=?,available=1,data=? WHERE id=?", arguments: [scanID, try json(track), trackID]) }
     }
     public func scanHistory() throws -> [ScanProgress] { try list(ScanProgress.self, sql: "SELECT data FROM scanRun ORDER BY date DESC LIMIT 20") }
@@ -278,16 +297,16 @@ public actor LibraryDatabase {
         guard var album = try album(id) else { return }; album.favorite = value
         try pool.write { db in try db.execute(sql: "UPDATE album SET favorite=?,data=? WHERE id=?", arguments: [value, try json(album), id]) }
     }
-    public func editAlbum(_ id: String, title: String, artist: String, sectionID: String, artwork: String? = nil) throws {
+    public func editAlbum(_ id: String, title: String, artist: String, artwork: String? = nil) throws {
         let id = try resolvedLibraryID(id)
         guard var album = try album(id) else { return }
-        album.title = title; album.artist = artist; album.sectionID = sectionID
+        album.title = title; album.artist = artist
         if let artwork { album.artwork = artwork }
         try pool.write { db in
-            var fields = ["title": title, "artist": artist, "sectionID": sectionID]; if let artwork { fields["artwork"] = artwork }
+            var fields = ["title": title, "artist": artist]; if let artwork { fields["artwork"] = artwork }
             for (field, value) in fields { try db.execute(sql: "INSERT OR REPLACE INTO assertion(entityID,field,value,source) VALUES(?,?,?,'user')", arguments: [id, field, value]) }
-            try db.execute(sql: "UPDATE album SET title=?,artist=?,sectionID=?,data=? WHERE id=?", arguments: [title, artist, sectionID, try json(album), id])
-            try Self.index(db, id: id, kind: "album", title: title, subtitle: [artist, album.label, album.date].joined(separator: " · "), albumID: id, sectionID: sectionID)
+            try db.execute(sql: "UPDATE album SET title=?,artist=?,data=? WHERE id=?", arguments: [title, artist, try json(album), id])
+            try Self.index(db, id: id, kind: "album", title: title, subtitle: [artist, album.label, album.date].joined(separator: " · "), albumID: id, sectionID: album.sectionID)
         }
     }
     public func addAlias(artistID: String, alias: String) throws {
