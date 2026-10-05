@@ -15,7 +15,12 @@ struct PlaybackBar: View {
             }
             HStack(spacing: 22) {
                 HStack(spacing: 11) {
-                    ArtworkView(path: playback.currentAlbum?.artwork, size: 54)
+                    Button {
+                        if let albumID = playback.current?.albumID { model.go(.album(albumID)) }
+                    } label: { ArtworkView(path: playback.currentAlbum?.artwork, size: 54) }
+                    .buttonStyle(.plain).disabled(playback.current == nil)
+                    .help("앨범 상세 보기").accessibilityLabel("재생 중인 앨범 상세 보기")
+                    .accessibilityIdentifier("player-album-detail")
                     VStack(alignment: .leading, spacing: 4) {
                         Button { if let track = playback.current { model.go(.track(track.id)) } } label: { Text(playback.current?.title ?? "오늘은 어떤 음악을 들을까요?").font(.system(size: 12, weight: .medium)).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain)
                         Text(playback.currentAlbum?.artist ?? "앨범을 선택해 감상을 시작하세요").font(.caption).foregroundStyle(.secondary).lineLimit(1)

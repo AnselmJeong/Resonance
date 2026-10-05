@@ -88,7 +88,7 @@ public struct InfoSettings: Codable, Sendable {
     // Ollama Cloud with a model that can turn thinking off and keeps quotes verbatim.
     public var endpoint = "https://ollama.com/api/chat"
     public var model = "deepseek-v4.1-flash"
-    public var cacheMegabytes = 512
+    public var cacheMegabytes = 2048
     /// A model server on this Mac (Ollama, LM Studio…) needs no API key; it handles any cloud sign-in itself.
     public var isLocalEndpoint: Bool { ["localhost", "127.0.0.1", "::1"].contains(URL(string: endpoint)?.host ?? "") }
     /// Ollama Cloud also speaks the native Ollama API, which can turn off thinking and enforce the JSON schema.

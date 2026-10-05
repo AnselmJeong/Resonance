@@ -11,6 +11,7 @@ final class AppModel {
     let scanner: LibraryScanner
     let smbSessions: SMBSessionPool
     let audioFiles: AudioFileAccess
+    let artworkLoader: SMBArtworkLoader
     var smbConnections: [SMBConnection] = []
     let playback: PlaybackCoordinator
     let musicBrainz = MusicBrainzClient()
@@ -54,6 +55,12 @@ final class AppModel {
     var inspector = true
     var queueVisible = false
     var canLoadMore = false
+    var artworkCollecting = false
+    var artworkProcessed = 0
+    var artworkTotal = 0
+    var artworkRestored = 0
+    private var artworkTask: Task<Void, Never>?
+    private var artworkRescanRequested = false
     var loading = false
     var restored = false
     var scrollPositions: [String: String] = [:]
@@ -102,6 +109,7 @@ final class AppModel {
             try await KeychainStore.readAsync(connection.credentialAccount)
         }
         smbSessions = SMBSessionPool { try await KeychainStore.readAsync($0.credentialAccount) }
+        artworkLoader = SMBArtworkLoader(database: db, cache: AppPaths.cache, sessions: SMBSessionPool { try await KeychainStore.readAsync($0.credentialAccount) })
         scanner = LibraryScanner(database: db, cache: AppPaths.cache, remote: smbSessions)
         playback = PlaybackCoordinator(database: db, files: audioFiles); insights = InsightService(database: db)
         discovery = DiscoveryStore(service: MetadataDiscovery(database: db, client: musicBrainz, artworkDirectory: AppPaths.cache))
@@ -150,6 +158,7 @@ final class AppModel {
                 startScan()
                 #endif
             }
+            if !CommandLine.arguments.contains("--smb-verify-album") && !CommandLine.arguments.contains("--diagnostics") { startArtworkBackfill() }
             if CommandLine.arguments.contains("--diagnostics") { await diagnostics() }
         } catch { self.error = error.localizedDescription }
     }
@@ -187,6 +196,7 @@ final class AppModel {
                         await self?.acceptProgress(update)
                     }
                     scanSummary.include(final, root: root); scan = nil
+                    startArtworkBackfill()
                     if let i = roots.firstIndex(where: { $0.id == root.id }), root.smb != nil { roots[i].status = final.finished ? "연결됨" : "부분 스캔"; try await db.saveRoot(roots[i]) }
                     if final.cancelled { break }
                 } catch is CancellationError { scanSummary.cancelled = true; break }
@@ -201,7 +211,7 @@ final class AppModel {
             scanSummary.cancelled = scanSummary.cancelled || Task.isCancelled
             discovery.changed(); await playback.refreshLibraryReferences(); await reload(reportError: false)
             AppLog.library.info("Scan ended; albumCount=\(self.counts.albums, privacy: .public); trackCount=\(self.counts.tracks, privacy: .public); issues=\(self.scanSummary.errors.count, privacy: .public)")
-            try? ArtworkCache.trim(directory: AppPaths.cache, megabytes: settings.cacheMegabytes)
+            // Artwork collection maintains its own cache after metadata scanning finishes.
             let shouldRescan = rescanRequested && !Task.isCancelled
             rescanRequested = false; scanning = false; scanTask = nil; scanCancelling = false
             var result = ScanProgress()
@@ -271,6 +281,8 @@ final class AppModel {
         } catch { if reportError { self.error = error.localizedDescription } else { scanSummary.errors.append(error.localizedDescription) } }
     }
     func refreshGrid(more: Bool = false, reportError: Bool = true, preserveLoadedAlbums: Bool = false) async {
+        if more && (loading || !canLoadMore) { return }
+        if preserveLoadedAlbums && loading { return }
         refreshGeneration += 1; let token = refreshGeneration; loading = true
         defer { if token == refreshGeneration { loading = false } }
         do {
@@ -280,10 +292,68 @@ final class AppModel {
             }
             if selection == "artists" { let result = try await db.artists(limit: 500); guard token == refreshGeneration else { return }; people = result; return }
             let pageSize = preserveLoadedAlbums ? max(120, albums.count) : 120
-            let page = try await db.albums(rootIDs: rootIDs, sectionIDs: sectionIDs, favorites: selection == "favorites", sort: sort, limit: pageSize, offset: more ? albums.count : 0)
+            let page = try await db.albums(rootIDs: rootIDs, sectionIDs: sectionIDs, favorites: selection == "favorites", sort: sort, limit: pageSize + 1, offset: more ? albums.count : 0)
             guard token == refreshGeneration else { return }
-            albums = more ? albums + page : page; canLoadMore = page.count == pageSize
+            let visible = Array(page.prefix(pageSize))
+            albums = more ? albums + visible : visible; canLoadMore = page.count > pageSize
         } catch { if token == refreshGeneration { if reportError { self.error = error.localizedDescription } else { scanSummary.errors.append(error.localizedDescription) } } }
+    }
+    func trimArtworkCache() async throws {
+        let paths = Set(try await db.albums(limit: Int.max).compactMap(\.artwork))
+        let limit = settings.cacheMegabytes
+        try await Task.detached(priority: .utility) {
+            try ArtworkCache.trim(directory: AppPaths.cache, megabytes: limit, preserving: paths)
+        }.value
+    }
+    func startArtworkBackfill() {
+        guard artworkTask == nil else { artworkRescanRequested = true; return }
+        artworkCollecting = true; artworkProcessed = 0; artworkRestored = 0; artworkTotal = 0
+        artworkTask = Task {
+            do {
+                let rootIDs = roots.filter { $0.smb != nil }.map(\.id)
+                let candidates = try await db.albums(rootIDs: rootIDs, limit: Int.max)
+                let missing = await Task.detached(priority: .utility) {
+                    candidates.filter { $0.artwork.map { FileManager.default.fileExists(atPath: $0) } != true }
+                }.value
+                artworkTotal = missing.count
+                await withTaskGroup(of: Bool.self) { group in
+                    var iterator = missing.makeIterator()
+                    func enqueue(_ album: Album) {
+                        group.addTask { [weak self] in
+                            guard !Task.isCancelled, let self else { return false }
+                            let path = await self.loadArtwork(album)
+                            return path.map { FileManager.default.fileExists(atPath: $0) } == true
+                        }
+                    }
+                    for _ in 0..<2 { if let album = iterator.next() { enqueue(album) } }
+                    for await restored in group {
+                        artworkProcessed += 1
+                        if restored { artworkRestored += 1 }
+                        if !Task.isCancelled, let album = iterator.next() { enqueue(album) }
+                    }
+                }
+                try? await db.setPreference("artworkBackfill", value: ["total": artworkTotal, "restored": artworkRestored, "unavailable": artworkTotal - artworkRestored])
+                if !scanning { try? await trimArtworkCache() }
+            } catch { AppLog.library.error("Artwork collection failed: \(error.localizedDescription, privacy: .private)") }
+            artworkCollecting = false; artworkTask = nil
+            if artworkRescanRequested { artworkRescanRequested = false; startArtworkBackfill() }
+        }
+    }
+    func loadMoreAlbums(after albumID: String) async {
+        guard query.isEmpty, selection != "artists", canLoadMore, !loading,
+              let index = albums.firstIndex(where: { $0.id == albumID }), index >= albums.count - 14 else { return }
+        await refreshGrid(more: true)
+    }
+    func loadArtwork(_ album: Album) async -> String? {
+        guard let source = roots.first(where: { $0.id == album.rootID })?.smb else { return album.artwork }
+        do {
+            let path = try await artworkLoader.load(album: album, source: source)
+            if let path {
+                if let index = albums.firstIndex(where: { $0.id == album.id }) { albums[index].artwork = path }
+                if playback.currentAlbum?.id == album.id { playback.currentAlbum?.artwork = path }
+            }
+            return path ?? album.artwork
+        } catch { return album.artwork }
     }
     func scheduleSearch() {
         queryTask?.cancel(); queryTask = Task { try? await Task.sleep(nanoseconds: 180_000_000); guard !Task.isCancelled else { return }; destination = .library; await refreshGrid() }

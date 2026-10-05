@@ -18,13 +18,18 @@ public enum ArtworkCache {
         if FileManager.default.fileExists(atPath: destination.path) { try? FileManager.default.removeItem(at: temporary) } else { try FileManager.default.moveItem(at: temporary, to: destination) }
         return destination.path
     }
-    public static func trim(directory: URL, megabytes: Int) throws {
+    public static func trim(directory: URL, megabytes: Int, preserving paths: Set<String> = []) throws {
+        let protected = Set(paths.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path })
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
-        let sorted = files.compactMap { url -> (URL, Int, Date)? in
+        let sorted = files.compactMap { url -> (URL, Int, Date, Bool)? in
             guard url.pathExtension == "jpg", let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else { return nil }
-            return (url, values.fileSize ?? 0, values.contentModificationDate ?? .distantPast)
-        }.sorted { $0.2 < $1.2 }
+            return (url, values.fileSize ?? 0, values.contentModificationDate ?? .distantPast, protected.contains(url.resolvingSymlinksInPath().path))
+        }.sorted {
+            let lhs = $0.3, rhs = $1.3
+            if lhs != rhs { return !lhs }
+            return $0.2 < $1.2
+        }
         var total = sorted.reduce(0) { $0 + $1.1 }
-        for (url, size, _) in sorted where total > max(50, megabytes) * 1024 * 1024 { try FileManager.default.removeItem(at: url); total -= size }
+        for (url, size, _, _) in sorted where total > max(50, megabytes) * 1024 * 1024 { try FileManager.default.removeItem(at: url); total -= size }
     }
 }

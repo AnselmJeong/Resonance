@@ -13,7 +13,9 @@ struct NowPlayingInspector: View {
             VStack(alignment: .leading, spacing: 20) {
                 HStack { Text("감상 노트").font(.headline); Spacer(); Image(systemName: "text.book.closed").foregroundStyle(.secondary) }
                 if let track {
-                    ArtworkView(path: album?.artwork, size: 230)
+                    Button { model.go(.album(track.albumID)) } label: { ArtworkView(path: album?.artwork, size: 230) }
+                        .buttonStyle(.plain).help("앨범 상세 보기")
+                        .accessibilityLabel("감상 노트 앨범 상세 보기").accessibilityIdentifier("inspector-album-detail")
                     VStack(alignment: .leading, spacing: 8) {
                         Text("NOW PLAYING").font(.caption2.weight(.semibold)).tracking(1.5).foregroundStyle(.secondary)
                         Button { model.go(.track(track.id)) } label: { Text(track.title).font(.title3.weight(.semibold)).frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain)

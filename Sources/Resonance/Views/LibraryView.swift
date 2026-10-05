@@ -59,10 +59,21 @@ struct LibraryView: View {
                 ContentUnavailableView(model.scanning ? "음악을 찾고 있습니다" : "아직 앨범이 없습니다", systemImage: model.scanning ? "waveform" : "square.grid.2x2", description: Text(model.selection == "favorites" ? "앨범의 하트를 눌러 여기에 모아두세요." : "라이브러리를 재스캔하거나 다른 음악 폴더를 추가하세요."))
             } else {
                 ScrollView {
+                  LazyVStack(spacing: 0) {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 174, maximum: 205), spacing: 22)], alignment: .leading, spacing: 26) {
-                        ForEach(model.albums) { album in AlbumCard(model: model, album: album) }
+                        ForEach(model.albums) { album in
+                            AlbumCard(model: model, album: album)
+                                .task { await model.loadMoreAlbums(after: album.id) }
+                        }
                     }.scrollTargetLayout().padding(.horizontal, 26).padding(.bottom, 24)
-                    if model.canLoadMore { Button("더 보기") { Task { await model.refreshGrid(more: true) } }.padding(.bottom, 24) }
+                    HStack {
+                        Text("\(model.albums.count.formatted())개 앨범 표시").font(.caption).foregroundStyle(.secondary)
+                        if model.canLoadMore {
+                            Button("더 보기") { Task { await model.refreshGrid(more: true) } }.disabled(model.loading)
+                        }
+                        if model.loading { ProgressView().controlSize(.small) }
+                    }.padding(.bottom, 24)
+                  }
                 }.scrollPosition(id: Binding(get: { model.scrollPositions[model.selection] }, set: { model.scrollPositions[model.selection] = $0 }))
             }
         }
@@ -77,10 +88,11 @@ struct AlbumCard: View {
     let model: AppModel
     let album: Album
     @State private var hovering = false
+    @State private var loadedArtwork: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             ZStack(alignment: .bottomTrailing) {
-                Button { model.go(.album(album.id)) } label: { ArtworkView(path: album.artwork) }.buttonStyle(.plain)
+                Button { model.go(.album(album.id)) } label: { ArtworkView(path: loadedArtwork ?? album.artwork) }.buttonStyle(.plain)
                 if hovering {
                     Button { model.playAlbum(album) } label: { Image(systemName: "play.fill").font(.title3).padding(13).background(.regularMaterial, in: Circle()) }.buttonStyle(.plain).padding(10).help("앨범 재생")
                 }
@@ -89,6 +101,7 @@ struct AlbumCard: View {
             Text(album.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             HStack { Text(album.year.isEmpty ? "\(album.trackCount) 트랙" : "\(album.year) · \(album.trackCount) 트랙").font(.caption2).foregroundStyle(.tertiary); if album.favorite { Image(systemName: "heart.fill").font(.caption2).foregroundStyle(.tint) } }
         }.frame(maxWidth: .infinity, alignment: .leading).onHover { hovering = $0 }
+        .task(id: album.artwork) { loadedArtwork = await model.loadArtwork(album) }
         .contextMenu {
             Button("앨범 재생", systemImage: "play") { model.playAlbum(album) }
             Button("다음에 재생") { model.enqueue(album, next: true) }

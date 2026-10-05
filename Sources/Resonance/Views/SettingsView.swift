@@ -84,7 +84,7 @@ struct SettingsView: View {
         }
     }
     @ViewBuilder private var operationsSettings: some View {
-        Section("파생 커버 캐시") { TextField("디스크 캐시 상한 (MB)", value: $model.settings.cacheMegabytes, format: .number); Button("캐시 상한 적용") { Task { let megabytes = model.settings.cacheMegabytes; do { try await Task.detached { try ArtworkCache.trim(directory: AppPaths.cache, megabytes: megabytes) }.value; message = "파생 커버 캐시를 정리했습니다. 재스캔하면 필요한 커버가 복원됩니다." } catch { message = error.localizedDescription } } } }
+        Section("파생 커버 캐시") { TextField("디스크 캐시 상한 (MB)", value: $model.settings.cacheMegabytes, format: .number); Button("캐시 상한 적용") { Task { do { try await model.trimArtworkCache(); message = "파생 커버 캐시를 정리했습니다. 재스캔하면 필요한 커버가 복원됩니다." } catch { message = error.localizedDescription } } } }
         Section("데이터베이스") {
             Button("일관된 DB 백업 저장…") { model.backup() }
             Button("DB 무결성 검사") { Task { message = (try? await model.db.integrityCheck()) == "ok" ? "DB 무결성: 정상" : "DB 무결성을 확인하지 못했습니다." } }

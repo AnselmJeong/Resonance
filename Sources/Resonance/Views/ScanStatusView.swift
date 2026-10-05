@@ -20,7 +20,7 @@ struct ScanStatusView: View {
     }
 
     var body: some View {
-        if model.scanning || model.scanNotice != nil {
+        if model.scanning || model.scanNotice != nil || model.artworkCollecting {
             VStack(alignment: .leading, spacing: 5) {
                 if model.scanning {
                     HStack(spacing: 6) {
@@ -46,6 +46,12 @@ struct ScanStatusView: View {
                         Button { model.scanNotice = nil } label: { Image(systemName: "xmark").padding(4) }
                             .buttonStyle(.plain).accessibilityLabel("스캔 메시지 닫기")
                     }
+                }
+                if model.artworkCollecting {
+                    Text("커버 저장 중 \(model.artworkProcessed.formatted()) / \(model.artworkTotal.formatted())")
+                        .lineLimit(1)
+                    ProgressView(value: Double(model.artworkProcessed), total: Double(max(1, model.artworkTotal)))
+                        .progressViewStyle(.linear).controlSize(.mini).tint(.secondary)
                 }
             }
             .font(.caption).foregroundStyle(.secondary)
