@@ -15,6 +15,7 @@ struct EntityDetailView: View {
     @State private var alias = ""
     @State private var linking = false
     @State private var loaded = false
+    @State private var selectedTrackIDs: Set<String> = []
     @State private var width: CGFloat = 0
     /// Room for the story beside the name instead of under it.
     private var wide: Bool { width >= 980 }
@@ -39,7 +40,11 @@ struct EntityDetailView: View {
             && (state.collaborator == "all" || track.credits.contains { $0.artistID == state.collaborator })
         }
     }
-    private var visibleAlbums: [Album] { Set(filtered.map(\.albumID)).compactMap { albums[$0] }.sorted { ($0.date, $0.title) < ($1.date, $1.title) } }
+    private var visibleAlbums: [Album] { Set(filtered.map(\.albumID)).compactMap { albums[$0] }.sorted { ($0.date, $0.title, $0.id) < ($1.date, $1.title, $1.id) } }
+    private func performanceTracks(_ album: Album) -> [Track] {
+        filtered.filter { $0.albumID == album.id }.sorted { ($0.disc, $0.number, $0.relativePath) < ($1.disc, $1.number, $1.relativePath) }
+    }
+    private var displayedTracks: [Track] { visibleAlbums.flatMap { performanceTracks($0) } }
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 24) {
@@ -88,6 +93,10 @@ struct EntityDetailView: View {
                 }
             }.padding(28).scrollTargetLayout()
         }.scrollPosition(id: binding(\.scroll))
+            // Musician pages list albums, not tracks; selection lives on album and work pages.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if loaded && kind == "work" { TrackSelectionBar(model: model, tracks: displayedTracks, selectedIDs: $selectedTrackIDs) }
+            }
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
             .task(id: entityID + String(model.discovery.revision)) { await load() }
             .sheet(isPresented: $linking) { IdentityLinkView(model: model, entityID: entityID, kind: kind, name: title) }
@@ -132,7 +141,7 @@ struct EntityDetailView: View {
         }
     }
     private func performance(_ album: Album) -> some View {
-        let performance = filtered.filter { $0.albumID == album.id }.sorted { ($0.disc, $0.number) < ($1.disc, $1.number) }
+        let performance = performanceTracks(album)
         let performers = Array(Set(performance.flatMap(\.credits).filter { ["performer", "conductor", "ensemble"].contains($0.role) }.map(\.name))).sorted()
         let dates = Array(Set(performance.compactMap { recordingDates[$0.id] })).sorted()
         return VStack(alignment: .leading, spacing: 14) {
@@ -149,7 +158,7 @@ struct EntityDetailView: View {
                 }
                 Spacer()
             }
-            if kind == "work" { ForEach(performance) { track in TrackRow(model: model, track: track, play: { Task { await model.playback.play(performance, start: performance.firstIndex { $0.id == track.id } ?? 0) } }) } }
+            if kind == "work" { ForEach(performance) { track in TrackRow(model: model, track: track, selectedIDs: $selectedTrackIDs, play: { Task { await model.playback.play(performance, start: performance.firstIndex { $0.id == track.id } ?? 0) } }) } }
         }.padding(18).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
             .contentShape(RoundedRectangle(cornerRadius: 14)).onTapGesture { if kind == "artist" { model.go(.album(album.id)) } }
     }

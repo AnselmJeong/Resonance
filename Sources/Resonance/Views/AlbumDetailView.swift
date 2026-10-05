@@ -9,6 +9,7 @@ struct AlbumDetailView: View {
     @State private var tracks: [Track] = []
     @State private var matchVisible = false
     @State private var editVisible = false
+    @State private var selectedTrackIDs: Set<String> = []
     var body: some View {
         Group {
             if let album {
@@ -46,10 +47,12 @@ struct AlbumDetailView: View {
                         if !album.attachments.isEmpty { BookletLinks(model: model, album: album).id("booklet") }
                         StoryPanel(model: model, request: .album(album, tracks: tracks)).id("story")
                         LazyVStack(spacing: 0) {
+                            TrackSelectionBar(model: model, tracks: tracks, selectedIDs: $selectedTrackIDs, isInline: true)
+                                .padding(.bottom, 8)
                             ForEach(Array(Set(tracks.map(\.disc))).sorted(), id: \.self) { disc in
                                 if Set(tracks.map(\.disc)).count > 1 { Text("DISC \(disc)").font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 14) }
                                 ForEach(tracks.filter { $0.disc == disc }) { track in
-                                    TrackRow(model: model, track: track, play: { model.playAlbum(album, start: tracks.firstIndex(where: { $0.id == track.id }) ?? 0) }).id(track.id)
+                                    TrackRow(model: model, track: track, selectedIDs: $selectedTrackIDs, play: { model.playAlbum(album, start: tracks.firstIndex(where: { $0.id == track.id }) ?? 0) }).id(track.id)
                                         .background(model.highlightedTrack == track.id ? Color.accentColor.opacity(0.09) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                                     Divider().opacity(0.45)
                                 }
@@ -69,8 +72,25 @@ struct AlbumDetailView: View {
 struct TrackRow: View {
     let model: AppModel
     let track: Track
+    @Binding var selectedIDs: Set<String>
     let play: () -> Void
     var body: some View {
+        HStack(spacing: 12) {
+            Toggle("곡 선택: \(track.title)", isOn: Binding(
+                get: { selectedIDs.contains(track.id) },
+                set: { if $0 { selectedIDs.insert(track.id) } else { selectedIDs.remove(track.id) } }
+            ))
+            .toggleStyle(.checkbox).labelsHidden().frame(width: 18)
+            .accessibilityIdentifier("track-selection:" + track.id)
+            .disabled(!track.available || !track.supported)
+            .help(!track.available ? "연결되지 않은 음원" : !track.supported ? "미지원 형식" : "큐에 추가할 곡 선택")
+            // Keep double-click playback outside the checkbox hit area.
+            content.contentShape(Rectangle()).onTapGesture(count: 2, perform: play)
+        }
+        .padding(.vertical, 12)
+        .background(selectedIDs.contains(track.id) ? Color.accentColor.opacity(0.07) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+    }
+    private var content: some View {
         HStack(alignment: .center, spacing: 12) {
             Button(action: play) { if model.playback.current?.id == track.id { Image(systemName: "waveform").foregroundStyle(.tint) } else { Text(String(format: "%02d", track.number)).monospacedDigit().foregroundStyle(.secondary) } }.buttonStyle(.plain).frame(width: 30).help("이 트랙부터 재생")
             VStack(alignment: .leading, spacing: 5) {
@@ -89,7 +109,7 @@ struct TrackRow: View {
                 Button("큐에 추가") { Task { await model.playback.append([track]) } }
                 Section("크레디트") { ForEach(track.credits) { credit in Button("\(credit.roleLabel) · \(credit.name)") { model.go(.artist(credit.artistID)) } } }
             } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).frame(width: 25)
-        }.padding(.vertical, 12).contentShape(Rectangle()).onTapGesture(count: 2, perform: play)
+        }
     }
 }
 
